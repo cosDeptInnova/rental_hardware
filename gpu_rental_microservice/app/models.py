@@ -23,6 +23,12 @@ class JobPublic(BaseModel):
     created_at: datetime
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
+    worker_state: str
+    exit_code: Optional[int] = None
+    execution_error: Optional[str] = None
+    avg_gpu_util: float
+    avg_power_watts: float
+    energy_joules: float
 
 class UsagePublic(BaseModel):
     client_name: str

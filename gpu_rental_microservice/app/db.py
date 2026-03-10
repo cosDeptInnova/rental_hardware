@@ -58,7 +58,24 @@ def init_db():
                 created_at TEXT NOT NULL,
                 started_at TEXT,
                 finished_at TEXT,
+                worker_state TEXT NOT NULL DEFAULT 'queued',
+                exit_code INTEGER,
+                execution_error TEXT,
+                avg_gpu_util REAL NOT NULL DEFAULT 0,
+                avg_power_watts REAL NOT NULL DEFAULT 0,
+                energy_joules REAL NOT NULL DEFAULT 0,
                 UNIQUE(client_name, idempotency_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS job_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                gpu_util REAL NOT NULL DEFAULT 0,
+                memory_used_mb REAL NOT NULL DEFAULT 0,
+                power_watts REAL NOT NULL DEFAULT 0,
+                energy_joules REAL NOT NULL DEFAULT 0,
+                FOREIGN KEY(job_id) REFERENCES jobs(id)
             );
 
             CREATE TABLE IF NOT EXISTS request_audit (
@@ -74,6 +91,19 @@ def init_db():
             );
             '''
         )
+        _ensure_column(conn, "jobs", "worker_state", "TEXT NOT NULL DEFAULT 'queued'")
+        _ensure_column(conn, "jobs", "exit_code", "INTEGER")
+        _ensure_column(conn, "jobs", "execution_error", "TEXT")
+        _ensure_column(conn, "jobs", "avg_gpu_util", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "avg_power_watts", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "energy_joules", "REAL NOT NULL DEFAULT 0")
+
+
+def _ensure_column(conn, table_name: str, column_name: str, column_type: str):
+    cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    if any(c[1] == column_name for c in cols):
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 def upsert_client(**kwargs):
     with get_conn() as conn:
@@ -129,16 +159,46 @@ def insert_job(job: dict):
             INSERT INTO jobs (
                 id, client_name, workload_name, status, estimated_seconds,
                 billed_seconds, gpu_seconds, peak_vram_mb, input_bytes,
-                output_bytes, idempotency_key, created_at, started_at, finished_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_bytes, idempotency_key, created_at, started_at, finished_at,
+                worker_state, exit_code, execution_error, avg_gpu_util, avg_power_watts, energy_joules
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 job["id"], job["client_name"], job["workload_name"], job["status"],
                 job["estimated_seconds"], job["billed_seconds"], job["gpu_seconds"],
                 job["peak_vram_mb"], job["input_bytes"], job["output_bytes"],
-                job["idempotency_key"], job["created_at"], job["started_at"], job["finished_at"]
+                job["idempotency_key"], job["created_at"], job["started_at"], job["finished_at"],
+                job["worker_state"], job["exit_code"], job["execution_error"],
+                job["avg_gpu_util"], job["avg_power_watts"], job["energy_joules"]
             ),
         )
+
+
+def insert_job_metric(job_id: str, ts: str, gpu_util: float, memory_used_mb: float, power_watts: float, energy_joules: float):
+    with get_conn() as conn:
+        conn.execute(
+            '''
+            INSERT INTO job_metrics (job_id, ts, gpu_util, memory_used_mb, power_watts, energy_joules)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (job_id, ts, gpu_util, memory_used_mb, power_watts, energy_joules),
+        )
+
+
+def aggregate_job_metrics(job_id: str):
+    with get_conn() as conn:
+        return conn.execute(
+            '''
+            SELECT
+                COALESCE(AVG(gpu_util), 0) AS gpu_util,
+                COALESCE(MAX(memory_used_mb), 0) AS memory_used_mb,
+                COALESCE(AVG(power_watts), 0) AS power_watts,
+                COALESCE(MAX(energy_joules), 0) AS energy_joules
+            FROM job_metrics
+            WHERE job_id = ?
+            ''',
+            (job_id,),
+        ).fetchone()
 
 def get_job(job_id: str):
     with get_conn() as conn:

@@ -12,12 +12,14 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from .config import settings
 from .db import (
     init_db, insert_job, get_job, get_job_by_idempotency, update_job,
-    count_running_jobs, insert_audit, monthly_usage, list_clients, utcnow_iso
+    count_running_jobs, insert_audit, monthly_usage, list_clients, utcnow_iso,
+    insert_job_metric, aggregate_job_metrics
 )
 from .deps import get_current_client, require_scope, require_admin
 from .limiting import rate_limiter
 from .metering import REQUESTS, REQUEST_LATENCY, JOB_GPU_SECONDS, RUNNING_JOBS
 from .models import JobCreate, JobPublic, UsagePublic
+from .runner import run_workload
 
 app = FastAPI(
     title=settings.app_name,
@@ -77,27 +79,46 @@ def healthz():
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-async def _run_job(job_id: str, estimated_seconds: int, client_name: str, workload_name: str, gpu_share: float):
-    update_job(job_id, status="running", started_at=utcnow_iso())
+async def _run_job(job_id: str, estimated_seconds: int, client_name: str, workload_name: str, gpu_share: float, max_job_seconds: int):
+    update_job(job_id, status="running", worker_state="starting", started_at=utcnow_iso())
     RUNNING_JOBS.labels(client_name).inc()
     try:
-        await asyncio.sleep(min(estimated_seconds, 10))
-        billed_seconds = min(estimated_seconds, 10)
-        gpu_seconds = billed_seconds * gpu_share
-        peak_vram_mb = int(4000 + (gpu_share * 8000))
-        output_bytes = int(estimated_seconds * 1500)
+        result = await run_workload(
+            workload_name=workload_name,
+            estimated_seconds=estimated_seconds,
+            gpu_share=gpu_share,
+            max_job_seconds=max_job_seconds,
+        )
+        for metric in result.metrics:
+            insert_job_metric(
+                job_id=job_id,
+                ts=metric.ts,
+                gpu_util=metric.gpu_util,
+                memory_used_mb=metric.memory_used_mb,
+                power_watts=metric.power_watts,
+                energy_joules=metric.energy_joules,
+            )
+        aggregated = aggregate_job_metrics(job_id)
+        status = "succeeded" if result.worker_state == "succeeded" else "failed"
         update_job(
             job_id,
-            status="succeeded",
-            billed_seconds=billed_seconds,
-            gpu_seconds=gpu_seconds,
-            peak_vram_mb=peak_vram_mb,
-            output_bytes=output_bytes,
+            status=status,
+            billed_seconds=result.billed_seconds,
+            gpu_seconds=result.gpu_seconds,
+            peak_vram_mb=int(aggregated["memory_used_mb"] or result.peak_vram_mb),
+            avg_gpu_util=float(aggregated["gpu_util"] or 0.0),
+            avg_power_watts=float(aggregated["power_watts"] or 0.0),
+            energy_joules=float(aggregated["energy_joules"] or 0.0),
+            output_bytes=result.output_bytes,
+            worker_state=result.worker_state,
+            exit_code=result.exit_code,
+            execution_error=result.execution_error,
             finished_at=utcnow_iso(),
         )
-        JOB_GPU_SECONDS.labels(client_name, workload_name).inc(gpu_seconds)
-    except Exception:
-        update_job(job_id, status="failed", finished_at=utcnow_iso())
+        if result.gpu_seconds > 0:
+            JOB_GPU_SECONDS.labels(client_name, workload_name).inc(result.gpu_seconds)
+    except Exception as exc:
+        update_job(job_id, status="failed", worker_state="failed", execution_error=str(exc), finished_at=utcnow_iso())
     finally:
         RUNNING_JOBS.labels(client_name).dec()
 
@@ -148,6 +169,12 @@ async def create_job(payload: JobCreate, request: Request, client = Depends(requ
         "created_at": utcnow_iso(),
         "started_at": None,
         "finished_at": None,
+        "worker_state": "queued",
+        "exit_code": None,
+        "execution_error": None,
+        "avg_gpu_util": 0.0,
+        "avg_power_watts": 0.0,
+        "energy_joules": 0.0,
     }
     insert_job(row)
     asyncio.create_task(
@@ -157,6 +184,7 @@ async def create_job(payload: JobCreate, request: Request, client = Depends(requ
             client_name=client_name,
             workload_name=payload.workload_name,
             gpu_share=payload.gpu_share,
+            max_job_seconds=int(client["max_job_seconds"]),
         )
     )
     return row
