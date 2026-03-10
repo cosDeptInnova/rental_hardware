@@ -12,13 +12,14 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from .config import settings
 from .db import (
     init_db, insert_job, get_job, get_job_by_idempotency, update_job,
-    count_running_jobs, insert_audit, monthly_usage, list_clients, utcnow_iso,
+    count_running_jobs, insert_audit, monthly_usage, utcnow_iso,
     insert_job_metric, aggregate_job_metrics
 )
-from .deps import get_current_client, require_scope, require_admin
+from .deps import get_current_client, require_scope
 from .limiting import rate_limiter
 from .metering import REQUESTS, REQUEST_LATENCY, JOB_GPU_SECONDS, RUNNING_JOBS
 from .models import JobCreate, JobPublic, UsagePublic
+from .routers.admin import router as admin_router
 from .runner import run_workload
 
 app = FastAPI(
@@ -27,6 +28,8 @@ app = FastAPI(
     redoc_url="/redoc" if settings.docs_enabled else None,
 )
 
+
+app.include_router(admin_router)
 @app.on_event("startup")
 def startup():
     init_db()
@@ -219,6 +222,3 @@ def get_my_usage(client = Depends(require_scope("usage:read"))):
         "currency": settings.default_currency,
     }
 
-@app.get("/v1/admin/clients")
-def admin_clients(_ = Depends(require_admin)):
-    return [dict(r) for r in list_clients()]
