@@ -23,6 +23,8 @@ class JobPublic(BaseModel):
     peak_vram_mb: int
     input_bytes: int
     output_bytes: int
+    input_tokens: int
+    output_tokens: int
     created_at: datetime
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -31,6 +33,7 @@ class JobPublic(BaseModel):
     execution_error: Optional[str] = None
     avg_gpu_util: float
     avg_power_watts: float
+    peak_power_watts: float
     energy_joules: float
 
 
@@ -43,6 +46,12 @@ class UsagePublic(BaseModel):
     total_billed_seconds: int
     total_gpu_seconds: float
     total_peak_vram_mb: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_energy_joules: float
+    gpu_cost: float
+    token_cost: float
+    energy_cost: float
     estimated_cost: float
     currency: str = "EUR"
 
@@ -90,11 +99,22 @@ class PlanPublic(PlanCreate):
     updated_at: Optional[datetime] = None
 
 
-class ClientCreate(PlanLimits):
+class ClientCreate(BaseModel):
     client_name: str = Field(min_length=3, max_length=120)
     api_key: str = Field(min_length=16, max_length=256)
     scopes: list[str] = Field(min_length=1)
     plan_name: Optional[str] = Field(default=None, min_length=3, max_length=120)
+    requests_per_minute: int = Field(ge=1, le=5_000)
+    max_concurrent_jobs: int = Field(ge=1, le=128)
+    max_job_seconds: int = Field(ge=1, le=86_400)
+    max_input_bytes: int = Field(ge=1, le=1_000_000_000)
+    monthly_credit_limit: float = Field(gt=0, le=10_000_000)
+    price_per_gpu_second: float = Field(gt=0, le=100)
+    gpu_share: float = Field(gt=0, le=1)
+    max_tokens_per_job: int = Field(ge=1, le=10_000_000)
+    monthly_token_limit: int = Field(ge=1, le=100_000_000)
+    max_power_watts: float = Field(gt=0, le=10_000)
+    max_energy_joules_per_job: float = Field(gt=0, le=1_000_000_000)
     is_admin: bool = False
 
 
@@ -109,9 +129,10 @@ class ClientUpdate(BaseModel):
     monthly_credit_limit: Optional[float] = Field(default=None, gt=0, le=10_000_000)
     price_per_gpu_second: Optional[float] = Field(default=None, gt=0, le=100)
     gpu_share: Optional[float] = Field(default=None, gt=0, le=1)
+    max_tokens_per_job: Optional[int] = Field(default=None, ge=1, le=10_000_000)
+    monthly_token_limit: Optional[int] = Field(default=None, ge=1, le=100_000_000)
     max_power_watts: Optional[float] = Field(default=None, gt=0, le=10_000)
-    max_energy_joules: Optional[float] = Field(default=None, gt=0, le=1_000_000_000)
-    max_output_tokens: Optional[int] = Field(default=None, ge=1, le=10_000_000)
+    max_energy_joules_per_job: Optional[float] = Field(default=None, gt=0, le=1_000_000_000)
     is_admin: Optional[bool] = None
     is_active: Optional[bool] = None
 
@@ -127,9 +148,10 @@ class ClientPublic(BaseModel):
     monthly_credit_limit: float
     price_per_gpu_second: float
     gpu_share: float
+    max_tokens_per_job: int
+    monthly_token_limit: int
     max_power_watts: float
-    max_energy_joules: float
-    max_output_tokens: int
+    max_energy_joules_per_job: float
     is_admin: bool
     is_active: bool
     created_at: datetime

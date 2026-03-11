@@ -68,6 +68,28 @@ Ejemplo:
 - 0,0025 € por `gpu_second`
 - + 0,0003 € por segundo si `peak_vram_mb > 24000`
 
+## Pricing híbrido (gpu_seconds + tokens + energía)
+
+La facturación mensual estimada en la API (`/v1/usage/me`) usa la siguiente fórmula:
+
+```text
+coste_gpu    = total_gpu_seconds * price_per_gpu_second
+coste_tokens = ((total_input_tokens + total_output_tokens) / 1000) * price_per_1k_tokens
+coste_energia = (total_energy_joules / 3_600_000) * price_per_kwh
+coste_total  = coste_gpu + coste_tokens + coste_energia
+```
+
+Donde:
+- `price_per_gpu_second` viene del contrato del cliente.
+- `price_per_1k_tokens` se configura por entorno (`PRICE_PER_1K_TOKENS`).
+- `price_per_kwh` se configura por entorno (`PRICE_PER_KWH`).
+
+Además, antes de aceptar un job, el servicio valida límites de contrato por cliente:
+- `max_tokens_per_job`
+- `monthly_token_limit`
+- `max_power_watts`
+- `max_energy_joules_per_job`
+
 ## Seguridad
 
 - API keys **nunca** en claro en base de datos, solo hash SHA-256.
