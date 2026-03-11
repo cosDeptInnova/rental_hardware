@@ -1,6 +1,13 @@
+import uuid
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from ..config import settings
 from ..db import (
+    add_client_certificate,
+    add_client_ip_allowlist,
+    create_api_key,
     create_client,
     create_plan,
     deactivate_client,
@@ -8,39 +15,32 @@ from ..db import (
     get_client_by_name,
     get_plan,
     insert_config_audit,
+    list_client_ip_allowlist,
     list_clients,
     list_plans,
+    remove_client_ip_allowlist,
+    revoke_all_api_keys_for_client,
+    revoke_client_certificate,
     update_client,
     update_plan,
     utcnow_iso,
 )
 from ..deps import require_admin
 from ..models import (
+    ApiKeyRotateRequest,
+    ApiKeyRotateResponse,
+    ClientCertificateEntry,
     ClientCreate,
+    ClientIpAllowlistEntry,
     ClientPublic,
     ClientUpdate,
     PlanCreate,
     PlanPublic,
     PlanUpdate,
 )
-from ..security import hash_api_key
+from ..security import generate_api_key, hash_api_key, utcnow
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
-
-
-CONFIG_FIELDS = {
-    "requests_per_minute",
-    "max_concurrent_jobs",
-    "max_job_seconds",
-    "max_input_bytes",
-    "monthly_credit_limit",
-    "price_per_gpu_second",
-    "gpu_share",
-    "max_tokens_per_job",
-    "monthly_token_limit",
-    "max_power_watts",
-    "max_energy_joules_per_job",
-}
 
 
 def _to_client_public(row) -> ClientPublic:
@@ -66,6 +66,17 @@ def _build_diff(before: dict, after: dict) -> dict:
     return diff
 
 
+def _create_and_store_api_key(client_name: str, expires_in_days: int | None = None):
+    plain = generate_api_key(client_name)
+    key_hash, key_salt = hash_api_key(plain)
+    now_iso = utcnow_iso()
+    key_id = str(uuid.uuid4())
+    ttl_days = expires_in_days if expires_in_days is not None else settings.api_key_ttl_days
+    expires_at = (utcnow() + timedelta(days=ttl_days)).replace(microsecond=0).isoformat() if ttl_days else None
+    create_api_key(client_name=client_name, key_id=key_id, key_hash=key_hash, key_salt=key_salt, created_at=now_iso, expires_at=expires_at)
+    return key_id, plain, now_iso, expires_at
+
+
 @router.get("/clients", response_model=list[ClientPublic])
 def admin_clients(_=Depends(require_admin)):
     return [_to_client_public(r) for r in list_clients()]
@@ -78,13 +89,16 @@ def admin_create_client(payload: ClientCreate, admin=Depends(require_admin)):
 
     now = utcnow_iso()
     data = payload.model_dump()
-    data["api_key_hash"] = hash_api_key(data.pop("api_key"))
+    data.pop("api_key")
     data["scopes"] = ",".join(data["scopes"])
     data["is_admin"] = int(data["is_admin"])
     data["is_active"] = 1
     data["created_at"] = now
     data["updated_at"] = now
     create_client(data)
+
+    _create_and_store_api_key(payload.client_name)
+
     created = get_client_by_name(payload.client_name)
     insert_config_audit(
         actor_client_name=admin["client_name"],
@@ -94,6 +108,54 @@ def admin_create_client(payload: ClientCreate, admin=Depends(require_admin)):
         diff={"created": payload.model_dump(exclude={"api_key"})},
     )
     return _to_client_public(created)
+
+
+@router.post("/clients/{client_name}/api-keys/rotate", response_model=ApiKeyRotateResponse)
+def admin_rotate_client_api_key(client_name: str, payload: ApiKeyRotateRequest, admin=Depends(require_admin)):
+    current = get_client_by_name(client_name)
+    if not current:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if payload.revoke_previous:
+        revoke_all_api_keys_for_client(client_name, utcnow_iso())
+    key_id, plain, created_at, expires_at = _create_and_store_api_key(client_name, payload.expires_in_days)
+    insert_config_audit(
+        actor_client_name=admin["client_name"],
+        entity_type="api_key",
+        entity_name=client_name,
+        action="rotate",
+        diff={"key_id": key_id, "expires_at": expires_at, "revoke_previous": payload.revoke_previous},
+    )
+    return ApiKeyRotateResponse(key_id=key_id, api_key=plain, created_at=created_at, expires_at=expires_at)
+
+
+@router.post("/clients/{client_name}/ip-allowlist")
+def admin_add_ip_allowlist(client_name: str, payload: ClientIpAllowlistEntry, admin=Depends(require_admin)):
+    if not get_client_by_name(client_name):
+        raise HTTPException(status_code=404, detail="Client not found")
+    add_client_ip_allowlist(client_name, payload.ip_cidr, utcnow_iso())
+    insert_config_audit(admin["client_name"], "client_ip_allowlist", client_name, "add", {"ip_cidr": payload.ip_cidr})
+    return {"client_name": client_name, "ip_allowlist": [r["ip_cidr"] for r in list_client_ip_allowlist(client_name)]}
+
+
+@router.delete("/clients/{client_name}/ip-allowlist")
+def admin_remove_ip_allowlist(client_name: str, payload: ClientIpAllowlistEntry, admin=Depends(require_admin)):
+    remove_client_ip_allowlist(client_name, payload.ip_cidr)
+    insert_config_audit(admin["client_name"], "client_ip_allowlist", client_name, "remove", {"ip_cidr": payload.ip_cidr})
+    return {"client_name": client_name, "ip_allowlist": [r["ip_cidr"] for r in list_client_ip_allowlist(client_name)]}
+
+
+@router.post("/clients/{client_name}/certificates")
+def admin_add_certificate(client_name: str, payload: ClientCertificateEntry, admin=Depends(require_admin)):
+    add_client_certificate(client_name, payload.fingerprint, utcnow_iso())
+    insert_config_audit(admin["client_name"], "client_certificate", client_name, "add", {"fingerprint": payload.fingerprint})
+    return {"status": "ok"}
+
+
+@router.post("/clients/{client_name}/certificates/revoke")
+def admin_revoke_certificate(client_name: str, payload: ClientCertificateEntry, admin=Depends(require_admin)):
+    revoke_client_certificate(payload.fingerprint, utcnow_iso())
+    insert_config_audit(admin["client_name"], "client_certificate", client_name, "revoke", {"fingerprint": payload.fingerprint})
+    return {"status": "ok"}
 
 
 @router.patch("/clients/{client_name}", response_model=ClientPublic)
@@ -113,7 +175,8 @@ def admin_update_client(client_name: str, payload: ClientUpdate, admin=Depends(r
             raise HTTPException(status_code=400, detail="max_energy_joules_per_job must be >= max_power_watts")
 
     if "api_key" in updates:
-        updates["api_key_hash"] = hash_api_key(updates.pop("api_key"))
+        updates.pop("api_key")
+        _create_and_store_api_key(client_name)
     if "scopes" in updates:
         updates["scopes"] = ",".join(updates["scopes"])
     if "is_admin" in updates:

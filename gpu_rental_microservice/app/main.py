@@ -40,7 +40,7 @@ async def audit_and_security_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())
     request.state.request_id = request_id
 
-    client_name = "anonymous"
+    client_name = getattr(request.state, "authenticated_client_name", "anonymous")
     response = None
     try:
         response = await call_next(request)
@@ -49,9 +49,7 @@ async def audit_and_security_middleware(request: Request, call_next):
         raise
     finally:
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        x_api_key = request.headers.get("X-API-Key")
-        if x_api_key:
-            client_name = request.headers.get("X-Client-Name", "authenticated")
+        client_name = getattr(request.state, "authenticated_client_name", client_name)
         response_bytes = len(getattr(response, "body", b"") or b"")
         request_bytes = int(request.headers.get("content-length", "0") or "0")
         insert_audit(
@@ -59,6 +57,8 @@ async def audit_and_security_middleware(request: Request, call_next):
             path=request.url.path,
             method=request.method,
             status_code=response.status_code,
+            event_type="request",
+            event_detail=getattr(request.state, "auth_type", None),
             request_bytes=request_bytes,
             response_bytes=response_bytes,
             latency_ms=latency_ms,

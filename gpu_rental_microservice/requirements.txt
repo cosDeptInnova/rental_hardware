@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.8.0
 prometheus-client>=0.20.0
 nvidia-ml-py>=12.560.30
+

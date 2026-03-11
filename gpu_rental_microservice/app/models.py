@@ -156,3 +156,23 @@ class ClientPublic(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+
+class ApiKeyRotateRequest(BaseModel):
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    revoke_previous: bool = True
+
+
+class ApiKeyRotateResponse(BaseModel):
+    key_id: str
+    api_key: str
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+
+
+class ClientIpAllowlistEntry(BaseModel):
+    ip_cidr: str = Field(min_length=3, max_length=64)
+
+
+class ClientCertificateEntry(BaseModel):
+    fingerprint: str = Field(min_length=16, max_length=256)
