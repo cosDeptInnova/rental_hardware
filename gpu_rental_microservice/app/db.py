@@ -61,9 +61,10 @@ def init_db():
                 monthly_credit_limit REAL NOT NULL,
                 price_per_gpu_second REAL NOT NULL,
                 gpu_share REAL NOT NULL,
+                max_tokens_per_job INTEGER NOT NULL DEFAULT 100000,
+                monthly_token_limit INTEGER NOT NULL DEFAULT 1000000,
                 max_power_watts REAL NOT NULL DEFAULT 1000,
-                max_energy_joules REAL NOT NULL DEFAULT 10000000,
-                max_output_tokens INTEGER NOT NULL DEFAULT 100000,
+                max_energy_joules_per_job REAL NOT NULL DEFAULT 10000000,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -81,6 +82,8 @@ def init_db():
                 peak_vram_mb INTEGER NOT NULL DEFAULT 0,
                 input_bytes INTEGER NOT NULL DEFAULT 0,
                 output_bytes INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
                 idempotency_key TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 started_at TEXT,
@@ -90,6 +93,7 @@ def init_db():
                 execution_error TEXT,
                 avg_gpu_util REAL NOT NULL DEFAULT 0,
                 avg_power_watts REAL NOT NULL DEFAULT 0,
+                peak_power_watts REAL NOT NULL DEFAULT 0,
                 energy_joules REAL NOT NULL DEFAULT 0,
                 UNIQUE(client_name, idempotency_key)
             );
@@ -133,10 +137,14 @@ def init_db():
         _ensure_column(conn, "jobs", "execution_error", "TEXT")
         _ensure_column(conn, "jobs", "avg_gpu_util", "REAL NOT NULL DEFAULT 0")
         _ensure_column(conn, "jobs", "avg_power_watts", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "peak_power_watts", "REAL NOT NULL DEFAULT 0")
         _ensure_column(conn, "jobs", "energy_joules", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "input_tokens", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "output_tokens", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "clients", "max_tokens_per_job", "INTEGER NOT NULL DEFAULT 100000")
+        _ensure_column(conn, "clients", "monthly_token_limit", "INTEGER NOT NULL DEFAULT 1000000")
         _ensure_column(conn, "clients", "max_power_watts", "REAL NOT NULL DEFAULT 1000")
-        _ensure_column(conn, "clients", "max_energy_joules", "REAL NOT NULL DEFAULT 10000000")
-        _ensure_column(conn, "clients", "max_output_tokens", "INTEGER NOT NULL DEFAULT 100000")
+        _ensure_column(conn, "clients", "max_energy_joules_per_job", "REAL NOT NULL DEFAULT 10000000")
         _ensure_column(conn, "clients", "updated_at", "TEXT")
 
 
@@ -155,9 +163,9 @@ def upsert_client(**kwargs):
                 client_name, api_key_hash, scopes, plan_name,
                 requests_per_minute, max_concurrent_jobs, max_job_seconds,
                 max_input_bytes, monthly_credit_limit, price_per_gpu_second,
-                gpu_share, max_power_watts, max_energy_joules, max_output_tokens,
-                is_admin, is_active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                gpu_share, max_tokens_per_job, monthly_token_limit, max_power_watts, max_energy_joules_per_job,
+                is_admin, is_active, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_name) DO UPDATE SET
                 api_key_hash=excluded.api_key_hash,
                 scopes=excluded.scopes,
@@ -169,9 +177,10 @@ def upsert_client(**kwargs):
                 monthly_credit_limit=excluded.monthly_credit_limit,
                 price_per_gpu_second=excluded.price_per_gpu_second,
                 gpu_share=excluded.gpu_share,
+                max_tokens_per_job=excluded.max_tokens_per_job,
+                monthly_token_limit=excluded.monthly_token_limit,
                 max_power_watts=excluded.max_power_watts,
-                max_energy_joules=excluded.max_energy_joules,
-                max_output_tokens=excluded.max_output_tokens,
+                max_energy_joules_per_job=excluded.max_energy_joules_per_job,
                 is_admin=excluded.is_admin,
                 updated_at=excluded.updated_at
             ''',
@@ -187,10 +196,12 @@ def upsert_client(**kwargs):
                 kwargs["monthly_credit_limit"],
                 kwargs["price_per_gpu_second"],
                 kwargs["gpu_share"],
+                kwargs.get("max_tokens_per_job", 100_000),
+                kwargs.get("monthly_token_limit", 1_000_000),
                 kwargs.get("max_power_watts", 1000.0),
-                kwargs.get("max_energy_joules", 10_000_000.0),
-                kwargs.get("max_output_tokens", 100_000),
+                kwargs.get("max_energy_joules_per_job", 10_000_000.0),
                 kwargs["is_admin"],
+                kwargs.get("is_active", 1),
                 kwargs.get("updated_at", utcnow_iso()),
             ),
         )
@@ -220,9 +231,9 @@ def create_client(client: dict):
             INSERT INTO clients (
                 client_name, api_key_hash, scopes, plan_name, requests_per_minute,
                 max_concurrent_jobs, max_job_seconds, max_input_bytes, monthly_credit_limit,
-                price_per_gpu_second, gpu_share, max_power_watts, max_energy_joules,
-                max_output_tokens, is_admin, is_active, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                price_per_gpu_second, gpu_share, max_tokens_per_job, monthly_token_limit,
+                max_power_watts, max_energy_joules_per_job, is_admin, is_active, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 client["client_name"],
@@ -236,9 +247,10 @@ def create_client(client: dict):
                 client["monthly_credit_limit"],
                 client["price_per_gpu_second"],
                 client["gpu_share"],
+                client["max_tokens_per_job"],
+                client["monthly_token_limit"],
                 client["max_power_watts"],
-                client["max_energy_joules"],
-                client["max_output_tokens"],
+                client["max_energy_joules_per_job"],
                 client["is_admin"],
                 client.get("is_active", 1),
                 client["created_at"],
@@ -331,9 +343,9 @@ def insert_job(job: dict):
             INSERT INTO jobs (
                 id, client_name, workload_name, status, estimated_seconds,
                 billed_seconds, gpu_seconds, peak_vram_mb, input_bytes,
-                output_bytes, idempotency_key, created_at, started_at, finished_at,
-                worker_state, exit_code, execution_error, avg_gpu_util, avg_power_watts, energy_joules
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_bytes, input_tokens, output_tokens, idempotency_key, created_at, started_at, finished_at,
+                worker_state, exit_code, execution_error, avg_gpu_util, avg_power_watts, peak_power_watts, energy_joules
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 job["id"],
@@ -346,6 +358,8 @@ def insert_job(job: dict):
                 job["peak_vram_mb"],
                 job["input_bytes"],
                 job["output_bytes"],
+                job["input_tokens"],
+                job["output_tokens"],
                 job["idempotency_key"],
                 job["created_at"],
                 job["started_at"],
@@ -355,6 +369,7 @@ def insert_job(job: dict):
                 job["execution_error"],
                 job["avg_gpu_util"],
                 job["avg_power_watts"],
+                job["peak_power_watts"],
                 job["energy_joules"],
             ),
         )
@@ -379,6 +394,7 @@ def aggregate_job_metrics(job_id: str):
                 COALESCE(AVG(gpu_util), 0) AS gpu_util,
                 COALESCE(MAX(memory_used_mb), 0) AS memory_used_mb,
                 COALESCE(AVG(power_watts), 0) AS power_watts,
+                COALESCE(MAX(power_watts), 0) AS peak_power_watts,
                 COALESCE(MAX(energy_joules), 0) AS energy_joules
             FROM job_metrics
             WHERE job_id = ?
@@ -450,7 +466,10 @@ def monthly_usage(client_name: str, month_prefix: str):
                 COALESCE(SUM(output_bytes), 0) AS total_output_bytes,
                 COALESCE(SUM(billed_seconds), 0) AS total_billed_seconds,
                 COALESCE(SUM(gpu_seconds), 0) AS total_gpu_seconds,
-                COALESCE(MAX(peak_vram_mb), 0) AS total_peak_vram_mb
+                COALESCE(MAX(peak_vram_mb), 0) AS total_peak_vram_mb,
+                COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+                COALESCE(SUM(energy_joules), 0) AS total_energy_joules
             FROM jobs
             WHERE client_name = ? AND substr(created_at, 1, 7) = ?
             ''',
@@ -470,8 +489,8 @@ def list_clients():
             '''
             SELECT client_name, plan_name, requests_per_minute, max_concurrent_jobs,
                    max_job_seconds, max_input_bytes, monthly_credit_limit,
-                   price_per_gpu_second, gpu_share, max_power_watts,
-                   max_energy_joules, max_output_tokens, is_admin, is_active,
+                   price_per_gpu_second, gpu_share, max_tokens_per_job, monthly_token_limit,
+                   max_power_watts, max_energy_joules_per_job, is_admin, is_active,
                    created_at, updated_at, scopes
             FROM clients ORDER BY client_name
             '''

@@ -30,6 +30,7 @@ class RunnerResult:
     exit_code: Optional[int]
     execution_error: Optional[str]
     output_bytes: int
+    output_tokens: int
     billed_seconds: int
     gpu_seconds: float
     peak_vram_mb: int
@@ -70,10 +71,7 @@ class NVMLSampler:
             mem = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
             power = float(pynvml.nvmlDeviceGetPowerUsage(self.handle)) / 1000.0
             energy_now = self._energy_joules()
-            if energy_now is not None and self.start_energy_j is not None:
-                energy = max(0.0, energy_now - self.start_energy_j)
-            else:
-                energy = 0.0
+            energy = max(0.0, (energy_now or 0.0) - (self.start_energy_j or 0.0))
             return GPUMetric(
                 ts=now,
                 gpu_util=util,
@@ -108,7 +106,14 @@ def build_command(workload_name: str, estimated_seconds: int) -> list[str]:
     return ["python", "-c", python_code]
 
 
-async def run_workload(workload_name: str, estimated_seconds: int, gpu_share: float, max_job_seconds: int) -> RunnerResult:
+async def run_workload(
+    workload_name: str,
+    estimated_seconds: int,
+    gpu_share: float,
+    max_job_seconds: int,
+    max_power_watts: float,
+    max_energy_joules_per_job: float,
+) -> RunnerResult:
     command = build_command(workload_name, estimated_seconds)
     start = time.monotonic()
     proc = subprocess.Popen(
@@ -122,10 +127,20 @@ async def run_workload(workload_name: str, estimated_seconds: int, gpu_share: fl
     sampler = NVMLSampler()
     metrics: list[GPUMetric] = []
     collector_stop = threading.Event()
+    threshold_triggered: Optional[str] = None
 
     def collect_metrics():
+        nonlocal threshold_triggered
         while not collector_stop.is_set():
-            metrics.append(sampler.sample())
+            metric = sampler.sample()
+            metrics.append(metric)
+            if threshold_triggered is None and proc.poll() is None:
+                if metric.power_watts > max_power_watts:
+                    threshold_triggered = f"power threshold exceeded: {metric.power_watts:.2f}W > {max_power_watts:.2f}W"
+                    os.killpg(proc.pid, signal.SIGTERM)
+                elif metric.energy_joules > max_energy_joules_per_job:
+                    threshold_triggered = f"energy threshold exceeded: {metric.energy_joules:.2f}J > {max_energy_joules_per_job:.2f}J"
+                    os.killpg(proc.pid, signal.SIGTERM)
             time.sleep(1.0)
 
     collector = threading.Thread(target=collect_metrics, daemon=True)
@@ -167,6 +182,9 @@ async def run_workload(workload_name: str, estimated_seconds: int, gpu_share: fl
     exit_code = proc.returncode
     if timed_out:
         worker_state = "timeout"
+    elif threshold_triggered:
+        worker_state = "killed_threshold"
+        execution_error = threshold_triggered
     elif exit_code == 0:
         worker_state = "succeeded"
     else:
@@ -176,12 +194,14 @@ async def run_workload(workload_name: str, estimated_seconds: int, gpu_share: fl
 
     peak_vram_mb = int(max((m.memory_used_mb for m in metrics), default=0.0))
     gpu_seconds = billed_seconds * gpu_share
+    output_tokens = max(0, len(output) // 4)
 
     return RunnerResult(
         worker_state=worker_state,
         exit_code=exit_code,
         execution_error=execution_error,
         output_bytes=len(output),
+        output_tokens=output_tokens,
         billed_seconds=billed_seconds,
         gpu_seconds=gpu_seconds,
         peak_vram_mb=peak_vram_mb,

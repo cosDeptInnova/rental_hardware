@@ -36,9 +36,10 @@ CONFIG_FIELDS = {
     "monthly_credit_limit",
     "price_per_gpu_second",
     "gpu_share",
+    "max_tokens_per_job",
+    "monthly_token_limit",
     "max_power_watts",
-    "max_energy_joules",
-    "max_output_tokens",
+    "max_energy_joules_per_job",
 }
 
 
@@ -105,11 +106,11 @@ def admin_update_client(client_name: str, payload: ClientUpdate, admin=Depends(r
     if not updates:
         raise HTTPException(status_code=400, detail="No changes requested")
 
-    if "max_power_watts" in updates or "max_energy_joules" in updates:
+    if "max_power_watts" in updates or "max_energy_joules_per_job" in updates:
         power = float(updates.get("max_power_watts", current["max_power_watts"]))
-        energy = float(updates.get("max_energy_joules", current["max_energy_joules"]))
+        energy = float(updates.get("max_energy_joules_per_job", current["max_energy_joules_per_job"]))
         if energy < power:
-            raise HTTPException(status_code=400, detail="max_energy_joules must be >= max_power_watts")
+            raise HTTPException(status_code=400, detail="max_energy_joules_per_job must be >= max_power_watts")
 
     if "api_key" in updates:
         updates["api_key_hash"] = hash_api_key(updates.pop("api_key"))
