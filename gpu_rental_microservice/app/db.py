@@ -51,7 +51,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS clients (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 client_name TEXT UNIQUE NOT NULL,
-                api_key_hash TEXT UNIQUE NOT NULL,
+                api_key_hash TEXT,
                 scopes TEXT NOT NULL,
                 plan_name TEXT NOT NULL,
                 requests_per_minute INTEGER NOT NULL,
@@ -115,10 +115,42 @@ def init_db():
                 path TEXT NOT NULL,
                 method TEXT NOT NULL,
                 status_code INTEGER NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'request',
+                event_detail TEXT,
                 request_bytes INTEGER NOT NULL DEFAULT 0,
                 response_bytes INTEGER NOT NULL DEFAULT 0,
                 latency_ms REAL NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                key_hash TEXT NOT NULL,
+                key_salt TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked_at TEXT,
+                last_used_at TEXT,
+                FOREIGN KEY(client_name) REFERENCES clients(client_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS client_certificates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_name TEXT NOT NULL,
+                fingerprint TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                revoked_at TEXT,
+                FOREIGN KEY(client_name) REFERENCES clients(client_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS client_ip_allowlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_name TEXT NOT NULL,
+                ip_cidr TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(client_name, ip_cidr),
+                FOREIGN KEY(client_name) REFERENCES clients(client_name)
             );
 
             CREATE TABLE IF NOT EXISTS config_audit (
@@ -146,6 +178,8 @@ def init_db():
         _ensure_column(conn, "clients", "max_power_watts", "REAL NOT NULL DEFAULT 1000")
         _ensure_column(conn, "clients", "max_energy_joules_per_job", "REAL NOT NULL DEFAULT 10000000")
         _ensure_column(conn, "clients", "updated_at", "TEXT")
+        _ensure_column(conn, "request_audit", "event_type", "TEXT NOT NULL DEFAULT 'request'")
+        _ensure_column(conn, "request_audit", "event_detail", "TEXT")
 
 
 def _ensure_column(conn, table_name: str, column_name: str, column_type: str):
@@ -160,14 +194,13 @@ def upsert_client(**kwargs):
         conn.execute(
             '''
             INSERT INTO clients (
-                client_name, api_key_hash, scopes, plan_name,
+                client_name, scopes, plan_name,
                 requests_per_minute, max_concurrent_jobs, max_job_seconds,
                 max_input_bytes, monthly_credit_limit, price_per_gpu_second,
                 gpu_share, max_tokens_per_job, monthly_token_limit, max_power_watts, max_energy_joules_per_job,
                 is_admin, is_active, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(client_name) DO UPDATE SET
-                api_key_hash=excluded.api_key_hash,
                 scopes=excluded.scopes,
                 plan_name=excluded.plan_name,
                 requests_per_minute=excluded.requests_per_minute,
@@ -186,7 +219,6 @@ def upsert_client(**kwargs):
             ''',
             (
                 kwargs["client_name"],
-                kwargs["api_key_hash"],
                 kwargs["scopes"],
                 kwargs["plan_name"],
                 kwargs["requests_per_minute"],
@@ -207,13 +239,67 @@ def upsert_client(**kwargs):
         )
 
 
-def get_client_by_api_hash(api_key_hash: str):
+def create_api_key(client_name: str, key_id: str, key_hash: str, key_salt: str | None, created_at: str, expires_at: str | None):
     with get_conn() as conn:
-        cur = conn.execute(
-            "SELECT * FROM clients WHERE api_key_hash = ? AND is_active = 1",
-            (api_key_hash,),
+        conn.execute(
+            '''
+            INSERT INTO api_keys (id, client_name, key_hash, key_salt, created_at, expires_at, revoked_at, last_used_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+            ''',
+            (key_id, client_name, key_hash, key_salt, created_at, expires_at),
         )
-        return cur.fetchone()
+
+
+def revoke_api_key(key_id: str, revoked_at: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ?", (revoked_at, key_id))
+
+
+def revoke_all_api_keys_for_client(client_name: str, revoked_at: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE client_name = ?",
+            (revoked_at, client_name),
+        )
+
+
+def touch_api_key_usage(key_id: str, used_at: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (used_at, key_id))
+
+
+def list_active_api_keys_for_client(client_name: str, now_iso: str):
+    with get_conn() as conn:
+        return conn.execute(
+            '''
+            SELECT * FROM api_keys
+            WHERE client_name = ?
+              AND revoked_at IS NULL
+              AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY created_at DESC
+            ''',
+            (client_name, now_iso),
+        ).fetchall()
+
+
+def find_client_by_api_key(plain_api_key: str, verify_api_key_fn, now_iso: str):
+    with get_conn() as conn:
+        candidates = conn.execute(
+            '''
+            SELECT ak.*, c.*
+            FROM api_keys ak
+            JOIN clients c ON c.client_name = ak.client_name
+            WHERE c.is_active = 1
+              AND ak.revoked_at IS NULL
+              AND (ak.expires_at IS NULL OR ak.expires_at > ?)
+            ORDER BY ak.created_at DESC
+            ''',
+            (now_iso,),
+        ).fetchall()
+    for row in candidates:
+        if verify_api_key_fn(plain_api_key, row["key_hash"], row["key_salt"]):
+            return row
+    return None
 
 
 def get_client_by_name(client_name: str):
@@ -229,15 +315,14 @@ def create_client(client: dict):
         conn.execute(
             '''
             INSERT INTO clients (
-                client_name, api_key_hash, scopes, plan_name, requests_per_minute,
+                client_name, scopes, plan_name, requests_per_minute,
                 max_concurrent_jobs, max_job_seconds, max_input_bytes, monthly_credit_limit,
                 price_per_gpu_second, gpu_share, max_tokens_per_job, monthly_token_limit,
                 max_power_watts, max_energy_joules_per_job, is_admin, is_active, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 client["client_name"],
-                client["api_key_hash"],
                 client["scopes"],
                 client["plan_name"],
                 client["requests_per_minute"],
@@ -439,15 +524,17 @@ def insert_audit(**kwargs):
         conn.execute(
             '''
             INSERT INTO request_audit (
-                client_name, path, method, status_code,
+                client_name, path, method, status_code, event_type, event_detail,
                 request_bytes, response_bytes, latency_ms, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 kwargs["client_name"],
                 kwargs["path"],
                 kwargs["method"],
                 kwargs["status_code"],
+                kwargs.get("event_type", "request"),
+                kwargs.get("event_detail"),
                 kwargs["request_bytes"],
                 kwargs["response_bytes"],
                 kwargs["latency_ms"],
@@ -500,3 +587,73 @@ def list_clients():
 
 def utcnow_iso():
     return datetime.utcnow().replace(microsecond=0).isoformat()
+
+
+def add_client_ip_allowlist(client_name: str, ip_cidr: str, created_at: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO client_ip_allowlist (client_name, ip_cidr, created_at) VALUES (?, ?, ?)",
+            (client_name, ip_cidr, created_at),
+        )
+
+
+def remove_client_ip_allowlist(client_name: str, ip_cidr: str):
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM client_ip_allowlist WHERE client_name = ? AND ip_cidr = ?",
+            (client_name, ip_cidr),
+        )
+
+
+def list_client_ip_allowlist(client_name: str):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT ip_cidr FROM client_ip_allowlist WHERE client_name = ? ORDER BY ip_cidr",
+            (client_name,),
+        ).fetchall()
+
+
+def add_client_certificate(client_name: str, fingerprint: str, created_at: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO client_certificates (client_name, fingerprint, created_at, revoked_at) VALUES (?, ?, ?, NULL)",
+            (client_name, fingerprint, created_at),
+        )
+
+
+def revoke_client_certificate(fingerprint: str, revoked_at: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE client_certificates SET revoked_at = ? WHERE fingerprint = ?",
+            (revoked_at, fingerprint),
+        )
+
+
+def get_client_by_cert_fingerprint(fingerprint: str):
+    with get_conn() as conn:
+        return conn.execute(
+            '''
+            SELECT c.*
+            FROM client_certificates cc
+            JOIN clients c ON c.client_name = cc.client_name
+            WHERE cc.fingerprint = ?
+              AND cc.revoked_at IS NULL
+              AND c.is_active = 1
+            ''',
+            (fingerprint,),
+        ).fetchone()
+
+
+def count_recent_failed_auth(client_name: str, since_iso: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            '''
+            SELECT COUNT(*) AS c
+            FROM request_audit
+            WHERE client_name = ?
+              AND event_type = 'auth_failed'
+              AND created_at >= ?
+            ''',
+            (client_name, since_iso),
+        ).fetchone()
+        return int(row["c"])
