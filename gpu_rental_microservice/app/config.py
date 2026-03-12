@@ -12,6 +12,16 @@ class Settings(BaseModel):
     price_per_kwh: float = float(os.getenv("PRICE_PER_KWH", "0.25"))
     secure_headers: bool = True
 
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    redis_job_queue_key: str = os.getenv("REDIS_JOB_QUEUE_KEY", "jobs:queue")
+    redis_delayed_queue_key: str = os.getenv("REDIS_DELAYED_QUEUE_KEY", "jobs:delayed")
+
+    worker_poll_seconds: int = int(os.getenv("WORKER_POLL_SECONDS", "2"))
+    worker_lock_seconds: int = int(os.getenv("WORKER_LOCK_SECONDS", "60"))
+    worker_slot_lease_seconds: int = int(os.getenv("WORKER_SLOT_LEASE_SECONDS", "120"))
+    orphan_job_timeout_seconds: int = int(os.getenv("ORPHAN_JOB_TIMEOUT_SECONDS", "180"))
+    default_job_max_retries: int = int(os.getenv("DEFAULT_JOB_MAX_RETRIES", "3"))
+
     enable_api_key_auth: bool = os.getenv("ENABLE_API_KEY_AUTH", "true").lower() == "true"
     enable_jwt_auth: bool = os.getenv("ENABLE_JWT_AUTH", "false").lower() == "true"
     jwt_secret: str = os.getenv("JWT_SECRET", "")

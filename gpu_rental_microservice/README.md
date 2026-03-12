@@ -112,6 +112,7 @@ python -m venv .venv
 pip install -r requirements.txt
 python seed_demo.py
 uvicorn app.main:app --host 0.0.0.0 --port 8000
+python -m app.worker
 ```
 
 ## API key demo
@@ -134,6 +135,13 @@ demo-client-key-001
 ## Limitaciones deliberadas de esta PoC
 
 - Backend SQLite local para simplificar.
-- Cola y scheduler en proceso.
+- Cola distribuida en Redis + worker dedicado (`app/worker.py`).
 - El "trabajo GPU" es simulado y medido como si ocupara una fracción de GPU.
 - Para producción, sustituir por ejecución real en worker GPU y persistencia externa.
+
+
+## Variables nuevas
+
+- `REDIS_URL` (default `redis://localhost:6379/0`)
+- `DEFAULT_JOB_MAX_RETRIES`
+- `ORPHAN_JOB_TIMEOUT_SECONDS`
