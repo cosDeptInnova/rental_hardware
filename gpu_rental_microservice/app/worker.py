@@ -5,7 +5,7 @@ from .config import settings
 from .db import (
     init_db, claim_job, get_client_by_name, update_job, insert_job_metric,
     aggregate_job_metrics, mark_job_for_retry, recover_orphan_jobs,
-    release_job_lock, heartbeat_job
+    release_job_lock, heartbeat_job, reconcile_credit_reservation
 )
 from .job_queue import dequeue_job, promote_delayed_jobs, schedule_retry
 from .metering import JOB_GPU_SECONDS
@@ -58,6 +58,8 @@ async def _process_job(job: dict, worker_id: str):
             execution_error=result.execution_error,
             finished_at=__import__('datetime').datetime.utcnow().replace(microsecond=0).isoformat(),
         )
+        actual_cost = max(float(result.gpu_seconds), 0.0) * float(client["price_per_gpu_second"])
+        reconcile_credit_reservation(job["id"], actual_cost)
         if result.gpu_seconds > 0:
             JOB_GPU_SECONDS.labels(job["client_name"], job["workload_name"]).inc(result.gpu_seconds)
     except Exception as exc:

@@ -9,6 +9,13 @@ from .config import settings
 _lock = threading.Lock()
 
 
+class ReservationError(Exception):
+    def __init__(self, detail: str, status_code: int):
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
 def _connect():
     conn = sqlite3.connect(settings.db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -167,6 +174,18 @@ def init_db():
                 action TEXT NOT NULL,
                 diff_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS credit_reservations (
+                job_id TEXT PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                month_prefix TEXT NOT NULL,
+                reserved_cost REAL NOT NULL,
+                settled_cost REAL NOT NULL DEFAULT 0,
+                released_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                FOREIGN KEY(job_id) REFERENCES jobs(id)
             );
             '''
         )
@@ -479,6 +498,121 @@ def insert_job(job: dict):
         )
 
 
+def create_job_with_reservation(job: dict, projected_cost: float, estimated_input_tokens: int, month_prefix: str):
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
+        existing = conn.execute(
+            "SELECT * FROM jobs WHERE client_name = ? AND idempotency_key = ?",
+            (job["client_name"], job["idempotency_key"]),
+        ).fetchone()
+        if existing:
+            return dict(existing), False
+
+        usage = conn.execute(
+            '''
+            SELECT
+                COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+                COALESCE(SUM(gpu_seconds), 0) AS total_gpu_seconds
+            FROM jobs
+            WHERE client_name = ? AND substr(created_at, 1, 7) = ?
+            ''',
+            (job["client_name"], month_prefix),
+        ).fetchone()
+
+        client = conn.execute(
+            "SELECT monthly_token_limit, monthly_credit_limit, price_per_gpu_second FROM clients WHERE client_name = ?",
+            (job["client_name"],),
+        ).fetchone()
+        if not client:
+            raise ReservationError("Client not found", 404)
+
+        current_tokens = int(usage["total_input_tokens"] or 0)
+        if current_tokens + estimated_input_tokens > int(client["monthly_token_limit"]):
+            raise ReservationError("monthly token limit exceeded", 402)
+
+        consumed_cost = float(usage["total_gpu_seconds"] or 0) * float(client["price_per_gpu_second"])
+        active_reservations = conn.execute(
+            '''
+            SELECT COALESCE(SUM(reserved_cost - settled_cost), 0) AS active_reserved
+            FROM credit_reservations
+            WHERE client_name = ? AND month_prefix = ? AND released_at IS NULL
+            ''',
+            (job["client_name"], month_prefix),
+        ).fetchone()
+        projected_total = consumed_cost + float(active_reservations["active_reserved"] or 0) + projected_cost
+        if projected_total > float(client["monthly_credit_limit"]):
+            raise ReservationError("Monthly credit limit exceeded", 402)
+
+        conn.execute(
+            '''
+            INSERT INTO jobs (
+                id, client_name, workload_name, status, estimated_seconds,
+                billed_seconds, gpu_seconds, peak_vram_mb, input_bytes,
+                output_bytes, input_tokens, output_tokens, idempotency_key, created_at, started_at, finished_at,
+                worker_state, exit_code, execution_error, avg_gpu_util, avg_power_watts, peak_power_watts, energy_joules,
+                retry_count, max_retries, next_retry_at, locked_by, lock_expires_at, last_heartbeat
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                job["id"],
+                job["client_name"],
+                job["workload_name"],
+                job["status"],
+                job["estimated_seconds"],
+                job["billed_seconds"],
+                job["gpu_seconds"],
+                job["peak_vram_mb"],
+                job["input_bytes"],
+                job["output_bytes"],
+                job["input_tokens"],
+                job["output_tokens"],
+                job["idempotency_key"],
+                job["created_at"],
+                job["started_at"],
+                job["finished_at"],
+                job["worker_state"],
+                job["exit_code"],
+                job["execution_error"],
+                job["avg_gpu_util"],
+                job["avg_power_watts"],
+                job["peak_power_watts"],
+                job["energy_joules"],
+                job.get("retry_count", 0),
+                job.get("max_retries", 3),
+                job.get("next_retry_at"),
+                job.get("locked_by"),
+                job.get("lock_expires_at"),
+                job.get("last_heartbeat"),
+            ),
+        )
+        conn.execute(
+            '''
+            INSERT INTO credit_reservations (job_id, client_name, month_prefix, reserved_cost, settled_cost, released_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+            ''',
+            (job["id"], job["client_name"], month_prefix, projected_cost, utcnow_iso(), utcnow_iso()),
+        )
+        return job, True
+
+
+def reconcile_credit_reservation(job_id: str, settled_cost: float):
+    with get_conn() as conn:
+        _set_reservation_settlement(conn, job_id, settled_cost)
+
+
+def _set_reservation_settlement(conn, job_id: str, settled_cost: float):
+    now = utcnow_iso()
+    conn.execute(
+        '''
+        UPDATE credit_reservations
+        SET settled_cost = ?, released_at = ?, updated_at = ?
+        WHERE job_id = ? AND released_at IS NULL
+        ''',
+        (max(settled_cost, 0.0), now, now, job_id),
+    )
+
+
 def insert_job_metric(job_id: str, ts: str, gpu_util: float, memory_used_mb: float, power_watts: float, energy_joules: float):
     with get_conn() as conn:
         conn.execute(
@@ -583,6 +717,7 @@ def recover_orphan_jobs(orphan_timeout_seconds: int):
                     "UPDATE jobs SET status='failed', worker_state='orphan_failed', finished_at=?, execution_error='orphan job exceeded retries', locked_by=NULL, lock_expires_at=NULL WHERE id=?",
                     (now_iso, row['id']),
                 )
+                _set_reservation_settlement(conn, row['id'], 0.0)
         return len(rows)
 
 
@@ -603,6 +738,7 @@ def mark_job_for_retry(job_id: str, delay_seconds: int, error: str):
                 "UPDATE jobs SET status='failed', worker_state='failed', execution_error=?, finished_at=?, locked_by=NULL, lock_expires_at=NULL WHERE id=?",
                 (error, now.isoformat(), job_id),
             )
+            _set_reservation_settlement(conn, job_id, 0.0)
             return False
         conn.execute(
             "UPDATE jobs SET status='retry', worker_state='retry', retry_count=retry_count+1, next_retry_at=?, execution_error=?, locked_by=NULL, lock_expires_at=NULL WHERE id=?",
