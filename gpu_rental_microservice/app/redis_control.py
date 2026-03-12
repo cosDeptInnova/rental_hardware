@@ -74,3 +74,19 @@ def refresh_global_slot(client_name: str, job_id: str, lease_seconds: int):
 
 def release_global_slot(client_name: str, job_id: str):
     _redis_client.eval(RELEASE_SLOT_LUA, 2, f"conc:{client_name}:count", f"conc:{client_name}:job:{job_id}")
+
+
+RELEASE_LOCK_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
+def acquire_client_submission_lock(client_name: str, token: str, ttl_seconds: int) -> bool:
+    return bool(_redis_client.set(f"submit-lock:{client_name}", token, nx=True, ex=ttl_seconds))
+
+
+def release_client_submission_lock(client_name: str, token: str):
+    _redis_client.eval(RELEASE_LOCK_LUA, 1, f"submit-lock:{client_name}", token)

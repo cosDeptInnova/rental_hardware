@@ -8,14 +8,16 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .config import settings
 from .db import (
-    init_db, insert_job, get_job, get_job_by_idempotency,
-    count_running_jobs, insert_audit, monthly_usage, utcnow_iso, recover_orphan_jobs
+    init_db, get_job,
+    count_running_jobs, insert_audit, monthly_usage, utcnow_iso, recover_orphan_jobs,
+    create_job_with_reservation, ReservationError
 )
 from .deps import require_scope
 from .job_queue import enqueue_job
 from .limiting import rate_limiter
 from .metering import REQUESTS, REQUEST_LATENCY
 from .models import JobCreate, JobPublic, UsagePublic
+from .redis_control import acquire_client_submission_lock, release_client_submission_lock
 from .routers.admin import router as admin_router
 
 app = FastAPI(
@@ -108,21 +110,10 @@ async def create_job(payload: JobCreate, request: Request, client=Depends(requir
     if estimated_input_tokens > int(client["max_tokens_per_job"]):
         raise HTTPException(status_code=400, detail="estimated input tokens exceed max_tokens_per_job")
 
-    existing = get_job_by_idempotency(client_name, payload.idempotency_key)
-    if existing:
-        return dict(existing)
-
     month = datetime.utcnow().strftime("%Y-%m")
-    usage, client_row = monthly_usage(client_name, month)
-
-    if int(usage["total_input_tokens"] or 0) + estimated_input_tokens > int(client_row["monthly_token_limit"]):
-        raise HTTPException(status_code=402, detail="monthly token limit exceeded")
-
+    _, client_row = monthly_usage(client_name, month)
     projected_gpu_seconds = payload.estimated_seconds * payload.gpu_share
-    projected_gpu_cost = float(usage["total_gpu_seconds"] or 0) * float(client_row["price_per_gpu_second"])
-    projected_gpu_cost += projected_gpu_seconds * float(client_row["price_per_gpu_second"])
-    if projected_gpu_cost > float(client_row["monthly_credit_limit"]):
-        raise HTTPException(status_code=402, detail="Monthly credit limit exceeded")
+    projected_gpu_cost = projected_gpu_seconds * float(client_row["price_per_gpu_second"])
 
     job_id = str(uuid.uuid4())
     row = {
@@ -156,9 +147,26 @@ async def create_job(payload: JobCreate, request: Request, client=Depends(requir
         "lock_expires_at": None,
         "last_heartbeat": None,
     }
-    insert_job(row)
-    enqueue_job(job_id)
-    return row
+    lock_token = str(uuid.uuid4())
+    has_submission_lock = acquire_client_submission_lock(client_name, lock_token, ttl_seconds=10)
+    if not has_submission_lock:
+        raise HTTPException(status_code=409, detail="Concurrent submission in progress, retry")
+
+    try:
+        stored, created = create_job_with_reservation(
+            job=row,
+            projected_cost=projected_gpu_cost,
+            estimated_input_tokens=estimated_input_tokens,
+            month_prefix=month,
+        )
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    finally:
+        release_client_submission_lock(client_name, lock_token)
+
+    if created:
+        enqueue_job(job_id)
+    return stored
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobPublic)
