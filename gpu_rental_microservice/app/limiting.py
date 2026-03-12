@@ -1,21 +1,9 @@
-import time
-import threading
-from collections import defaultdict, deque
+from .redis_control import allow_rate_limit
 
-class InMemoryRateLimiter:
-    def __init__(self):
-        self.hits = defaultdict(deque)
-        self.lock = threading.Lock()
 
+class RedisSlidingWindowRateLimiter:
     def allow(self, key: str, limit: int, window_seconds: int = 60) -> bool:
-        now = time.time()
-        with self.lock:
-            dq = self.hits[key]
-            while dq and dq[0] <= now - window_seconds:
-                dq.popleft()
-            if len(dq) >= limit:
-                return False
-            dq.append(now)
-            return True
+        return allow_rate_limit(key=key, limit=limit, window_seconds=window_seconds)
 
-rate_limiter = InMemoryRateLimiter()
+
+rate_limiter = RedisSlidingWindowRateLimiter()

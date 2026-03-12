@@ -1,6 +1,5 @@
-import asyncio
-import uuid
 import time
+import uuid
 from datetime import datetime
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
@@ -9,16 +8,15 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .config import settings
 from .db import (
-    init_db, insert_job, get_job, get_job_by_idempotency, update_job,
-    count_running_jobs, insert_audit, monthly_usage, utcnow_iso,
-    insert_job_metric, aggregate_job_metrics
+    init_db, insert_job, get_job, get_job_by_idempotency,
+    count_running_jobs, insert_audit, monthly_usage, utcnow_iso, recover_orphan_jobs
 )
 from .deps import require_scope
+from .job_queue import enqueue_job
 from .limiting import rate_limiter
-from .metering import REQUESTS, REQUEST_LATENCY, JOB_GPU_SECONDS, RUNNING_JOBS
+from .metering import REQUESTS, REQUEST_LATENCY
 from .models import JobCreate, JobPublic, UsagePublic
 from .routers.admin import router as admin_router
-from .runner import run_workload
 
 app = FastAPI(
     title=settings.app_name,
@@ -32,6 +30,7 @@ app.include_router(admin_router)
 @app.on_event("startup")
 def startup():
     init_db()
+    recover_orphan_jobs(settings.orphan_job_timeout_seconds)
 
 
 @app.middleware("http")
@@ -89,60 +88,13 @@ def _estimate_tokens(raw_bytes: int) -> int:
     return max(0, raw_bytes // 4)
 
 
-async def _run_job(job_id: str, estimated_seconds: int, client_name: str, workload_name: str, gpu_share: float, max_job_seconds: int, max_power_watts: float, max_energy_joules_per_job: float):
-    update_job(job_id, status="running", worker_state="starting", started_at=utcnow_iso())
-    RUNNING_JOBS.labels(client_name).inc()
-    try:
-        result = await run_workload(
-            workload_name=workload_name,
-            estimated_seconds=estimated_seconds,
-            gpu_share=gpu_share,
-            max_job_seconds=max_job_seconds,
-            max_power_watts=max_power_watts,
-            max_energy_joules_per_job=max_energy_joules_per_job,
-        )
-        for metric in result.metrics:
-            insert_job_metric(
-                job_id=job_id,
-                ts=metric.ts,
-                gpu_util=metric.gpu_util,
-                memory_used_mb=metric.memory_used_mb,
-                power_watts=metric.power_watts,
-                energy_joules=metric.energy_joules,
-            )
-        aggregated = aggregate_job_metrics(job_id)
-        status = "succeeded" if result.worker_state == "succeeded" else "failed"
-        update_job(
-            job_id,
-            status=status,
-            billed_seconds=result.billed_seconds,
-            gpu_seconds=result.gpu_seconds,
-            peak_vram_mb=int(aggregated["memory_used_mb"] or result.peak_vram_mb),
-            avg_gpu_util=float(aggregated["gpu_util"] or 0.0),
-            avg_power_watts=float(aggregated["power_watts"] or 0.0),
-            peak_power_watts=float(aggregated["peak_power_watts"] or 0.0),
-            energy_joules=float(aggregated["energy_joules"] or 0.0),
-            output_bytes=result.output_bytes,
-            output_tokens=result.output_tokens,
-            worker_state=result.worker_state,
-            exit_code=result.exit_code,
-            execution_error=result.execution_error,
-            finished_at=utcnow_iso(),
-        )
-        if result.gpu_seconds > 0:
-            JOB_GPU_SECONDS.labels(client_name, workload_name).inc(result.gpu_seconds)
-    except Exception as exc:
-        update_job(job_id, status="failed", worker_state="failed", execution_error=str(exc), finished_at=utcnow_iso())
-    finally:
-        RUNNING_JOBS.labels(client_name).dec()
-
-
 @app.post("/v1/jobs", response_model=JobPublic, status_code=status.HTTP_202_ACCEPTED)
 async def create_job(payload: JobCreate, request: Request, client=Depends(require_scope("jobs:write"))):
     client_name = client["client_name"]
+    api_key_hash = getattr(request.state, "api_key_hash", client_name)
 
     rpm = int(client["requests_per_minute"])
-    if not rate_limiter.allow(f"{client_name}:rpm", limit=rpm, window_seconds=60):
+    if not rate_limiter.allow(f"{client_name}:{api_key_hash}:rpm", limit=rpm, window_seconds=60):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     if payload.estimated_seconds > int(client["max_job_seconds"]):
@@ -197,20 +149,15 @@ async def create_job(payload: JobCreate, request: Request, client=Depends(requir
         "avg_power_watts": 0.0,
         "peak_power_watts": 0.0,
         "energy_joules": 0.0,
+        "retry_count": 0,
+        "max_retries": settings.default_job_max_retries,
+        "next_retry_at": None,
+        "locked_by": None,
+        "lock_expires_at": None,
+        "last_heartbeat": None,
     }
     insert_job(row)
-    asyncio.create_task(
-        _run_job(
-            job_id=job_id,
-            estimated_seconds=payload.estimated_seconds,
-            client_name=client_name,
-            workload_name=payload.workload_name,
-            gpu_share=payload.gpu_share,
-            max_job_seconds=int(client["max_job_seconds"]),
-            max_power_watts=float(client["max_power_watts"]),
-            max_energy_joules_per_job=float(client["max_energy_joules_per_job"]),
-        )
-    )
+    enqueue_job(job_id)
     return row
 
 

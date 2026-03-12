@@ -95,6 +95,12 @@ def init_db():
                 avg_power_watts REAL NOT NULL DEFAULT 0,
                 peak_power_watts REAL NOT NULL DEFAULT 0,
                 energy_joules REAL NOT NULL DEFAULT 0,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 3,
+                next_retry_at TEXT,
+                locked_by TEXT,
+                lock_expires_at TEXT,
+                last_heartbeat TEXT,
                 UNIQUE(client_name, idempotency_key)
             );
 
@@ -173,6 +179,12 @@ def init_db():
         _ensure_column(conn, "jobs", "energy_joules", "REAL NOT NULL DEFAULT 0")
         _ensure_column(conn, "jobs", "input_tokens", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "jobs", "output_tokens", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "retry_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "max_retries", "INTEGER NOT NULL DEFAULT 3")
+        _ensure_column(conn, "jobs", "next_retry_at", "TEXT")
+        _ensure_column(conn, "jobs", "locked_by", "TEXT")
+        _ensure_column(conn, "jobs", "lock_expires_at", "TEXT")
+        _ensure_column(conn, "jobs", "last_heartbeat", "TEXT")
         _ensure_column(conn, "clients", "max_tokens_per_job", "INTEGER NOT NULL DEFAULT 100000")
         _ensure_column(conn, "clients", "monthly_token_limit", "INTEGER NOT NULL DEFAULT 1000000")
         _ensure_column(conn, "clients", "max_power_watts", "REAL NOT NULL DEFAULT 1000")
@@ -429,8 +441,9 @@ def insert_job(job: dict):
                 id, client_name, workload_name, status, estimated_seconds,
                 billed_seconds, gpu_seconds, peak_vram_mb, input_bytes,
                 output_bytes, input_tokens, output_tokens, idempotency_key, created_at, started_at, finished_at,
-                worker_state, exit_code, execution_error, avg_gpu_util, avg_power_watts, peak_power_watts, energy_joules
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                worker_state, exit_code, execution_error, avg_gpu_util, avg_power_watts, peak_power_watts, energy_joules,
+                retry_count, max_retries, next_retry_at, locked_by, lock_expires_at, last_heartbeat
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 job["id"],
@@ -456,6 +469,12 @@ def insert_job(job: dict):
                 job["avg_power_watts"],
                 job["peak_power_watts"],
                 job["energy_joules"],
+                job.get("retry_count", 0),
+                job.get("max_retries", 3),
+                job.get("next_retry_at"),
+                job.get("locked_by"),
+                job.get("lock_expires_at"),
+                job.get("last_heartbeat"),
             ),
         )
 
@@ -506,7 +525,7 @@ def get_job_by_idempotency(client_name: str, idempotency_key: str):
 def count_running_jobs(client_name: str) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "SELECT COUNT(*) AS c FROM jobs WHERE client_name = ? AND status IN ('queued','running')",
+            "SELECT COUNT(*) AS c FROM jobs WHERE client_name = ? AND status IN ('queued','running','retry')",
             (client_name,),
         )
         return int(cur.fetchone()["c"])
@@ -517,6 +536,80 @@ def update_job(job_id: str, **kwargs):
     values = list(kwargs.values()) + [job_id]
     with get_conn() as conn:
         conn.execute(f"UPDATE jobs SET {fields} WHERE id = ?", values)
+
+
+
+def claim_job(job_id: str, worker_id: str, lease_seconds: int):
+    now = utcnow_iso()
+    lock_expires_iso = datetime.utcfromtimestamp(datetime.utcnow().timestamp() + lease_seconds).replace(microsecond=0).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'running', worker_state = 'running', started_at = COALESCE(started_at, ?), locked_by = ?, lock_expires_at = ?, last_heartbeat = ? WHERE id = ? AND status IN ('queued','retry') AND (lock_expires_at IS NULL OR lock_expires_at < ?)",
+            (now, worker_id, lock_expires_iso, now, job_id, now),
+        )
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row and row['locked_by'] == worker_id and row['status'] == 'running':
+            return row
+    return None
+
+
+def heartbeat_job(job_id: str, worker_id: str, lease_seconds: int):
+    now = utcnow_iso()
+    lock_expires_iso = datetime.utcfromtimestamp(datetime.utcnow().timestamp() + lease_seconds).replace(microsecond=0).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE jobs SET last_heartbeat = ?, lock_expires_at = ? WHERE id = ? AND locked_by = ?",
+            (now, lock_expires_iso, job_id, worker_id),
+        )
+
+
+def recover_orphan_jobs(orphan_timeout_seconds: int):
+    now = datetime.utcnow().replace(microsecond=0)
+    threshold = datetime.utcfromtimestamp(now.timestamp() - orphan_timeout_seconds).replace(microsecond=0).isoformat()
+    now_iso = now.isoformat()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, retry_count, max_retries FROM jobs WHERE status = 'running' AND (last_heartbeat IS NULL OR last_heartbeat < ? OR (lock_expires_at IS NOT NULL AND lock_expires_at < ?))",
+            (threshold, now_iso),
+        ).fetchall()
+        for row in rows:
+            if int(row['retry_count']) < int(row['max_retries']):
+                conn.execute(
+                    "UPDATE jobs SET status='retry', worker_state='orphan_requeued', retry_count=retry_count+1, next_retry_at=?, locked_by=NULL, lock_expires_at=NULL WHERE id=?",
+                    (now_iso, row['id']),
+                )
+            else:
+                conn.execute(
+                    "UPDATE jobs SET status='failed', worker_state='orphan_failed', finished_at=?, execution_error='orphan job exceeded retries', locked_by=NULL, lock_expires_at=NULL WHERE id=?",
+                    (now_iso, row['id']),
+                )
+        return len(rows)
+
+
+def release_job_lock(job_id: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE jobs SET locked_by=NULL, lock_expires_at=NULL WHERE id=?", (job_id,))
+
+
+def mark_job_for_retry(job_id: str, delay_seconds: int, error: str):
+    now = datetime.utcnow().replace(microsecond=0)
+    next_retry = datetime.utcfromtimestamp(now.timestamp() + max(delay_seconds, 0)).replace(microsecond=0).isoformat()
+    with get_conn() as conn:
+        row = conn.execute("SELECT retry_count, max_retries FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            return False
+        if int(row['retry_count']) >= int(row['max_retries']):
+            conn.execute(
+                "UPDATE jobs SET status='failed', worker_state='failed', execution_error=?, finished_at=?, locked_by=NULL, lock_expires_at=NULL WHERE id=?",
+                (error, now.isoformat(), job_id),
+            )
+            return False
+        conn.execute(
+            "UPDATE jobs SET status='retry', worker_state='retry', retry_count=retry_count+1, next_retry_at=?, execution_error=?, locked_by=NULL, lock_expires_at=NULL WHERE id=?",
+            (next_retry, error, job_id),
+        )
+        return True
+
 
 
 def insert_audit(**kwargs):

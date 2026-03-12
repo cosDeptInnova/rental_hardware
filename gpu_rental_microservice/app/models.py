@@ -16,7 +16,7 @@ class JobPublic(BaseModel):
     id: str
     client_name: str
     workload_name: str
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: Literal["queued", "running", "retry", "succeeded", "failed"]
     estimated_seconds: int
     billed_seconds: int
     gpu_seconds: float
