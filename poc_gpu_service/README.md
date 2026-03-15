@@ -75,7 +75,7 @@ python scripts\restore_gpu0_state.py --lease_id lease-123 --dry_run
 ## Endpoints nuevos
 Bastion:
 - `POST /v1/admin/gpu0/snapshot`
-- `POST /v1/admin/gpu0/release`
+- `POST /v1/admin/gpu0/release` (si no alcanza objetivo seguro en modo no dry-run devuelve `insufficient_safe_capacity`)
 - `POST /v1/admin/gpu0/restore`
 - `GET /v1/admin/gpu0/status`
 - `GET /v1/admin/gpu0/snapshots`

@@ -88,9 +88,11 @@ def create_snapshot(db: Session, lease_id: str | None = None, tenant_id: str | N
                 "instance_id": item.instance_id,
                 "tenant_id": item.tenant_id,
                 "model_alias": item.model_alias,
+                "task_type": item.task_type,
                 "status": item.status,
                 "gpu_device": item.gpu_device,
                 "pid": item.pid,
+                "host": item.host,
                 "port": item.port,
                 "command": cmd,
                 "drainable": item.drainable,
@@ -137,12 +139,10 @@ def _is_non_drainable_name(name: str) -> bool:
 
 
 def _candidate_priority(instance: BackendInstance, alias_counts: dict[str, int]) -> tuple[int, int]:
-    if instance.drainable and instance.service_tier == "production_replicas":
+    if instance.service_tier == "production_replicas":
         return (1, instance.restore_priority)
-    if instance.tenant_id == "interno" and not instance.critical:
-        return (2, instance.restore_priority)
     if alias_counts.get(instance.model_alias, 0) > 1:
-        return (3, instance.restore_priority)
+        return (2, instance.restore_priority)
     return (99, instance.restore_priority)
 
 
@@ -158,10 +158,11 @@ def select_drain_candidates(db: Session) -> list[dict]:
     for item in running:
         if item.critical:
             continue
-        if not item.drainable and alias_counts.get(item.model_alias, 0) <= 1 and item.tenant_id != "interno":
+        if not item.drainable:
             continue
         if _is_non_drainable_name(item.model_alias):
             continue
+
         prio = _candidate_priority(item, alias_counts)
         if prio[0] < 99:
             candidates.append((prio, item))
@@ -173,6 +174,8 @@ def select_drain_candidates(db: Session) -> list[dict]:
             "pid": c.pid,
             "tenant_id": c.tenant_id,
             "model_alias": c.model_alias,
+            "host": c.host,
+            "port": c.port,
             "drainable": c.drainable,
             "critical": c.critical,
             "service_tier": c.service_tier,
@@ -204,6 +207,8 @@ def release_capacity(db: Session, target_free_vram_mib: int | None = None, safet
             if dry_run:
                 action["result"] = "planned"
                 actions.append(action)
+                post_step = _gpu0_status_payload()
+                current_free = post_step["memory_free_mib"]
                 continue
 
             result = stop_backend(db, instance_id=candidate["instance_id"])
@@ -220,6 +225,8 @@ def release_capacity(db: Session, target_free_vram_mib: int | None = None, safet
         warnings.append("Unable to reach target with safe managed candidates")
 
     result = {
+        "ok": reached,
+        "error_code": None if reached else "insufficient_safe_capacity",
         "snapshot_id": snapshot["snapshot_id"],
         "freed_vram_mib": freed,
         "target_reached": reached,
@@ -262,9 +269,9 @@ def restore_state(db: Session, snapshot_id: str | None = None, lease_id: str | N
         already = db.scalar(
             select(BackendInstance).where(
                 BackendInstance.status == "running",
-                BackendInstance.model_alias == item.get("model_alias"),
-                BackendInstance.tenant_id == item.get("tenant_id"),
                 BackendInstance.gpu_device == "CUDA0",
+                BackendInstance.host == (item.get("host") or "127.0.0.1"),
+                BackendInstance.port == (item.get("port") or 9001),
             )
         )
         if already:
@@ -281,7 +288,7 @@ def restore_state(db: Session, snapshot_id: str | None = None, lease_id: str | N
             tenant_id=item.get("tenant_id"),
             gpu_preference="CUDA0",
             task_type=item.get("task_type") or "chat",
-            host="127.0.0.1",
+            host=item.get("host") or "127.0.0.1",
             port=item.get("port") or 9001,
             metadata={
                 "drainable": bool(item.get("drainable", True)),

@@ -1,4 +1,5 @@
 from datetime import datetime
+import uuid
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -55,7 +56,7 @@ async def create_lease(payload: LeaseCreateRequest, db: Session = Depends(get_db
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
 
-    lease_id = f"lease-{datetime.utcnow().timestamp():.0f}"
+    lease_id = f"lease-{uuid.uuid4().hex[:12]}"
     requested_gpu = payload.requested_gpu or settings.default_gpu_device_for_client
 
     handoff = None

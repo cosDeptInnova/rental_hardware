@@ -3,6 +3,6 @@ from apps.bastion_control_plane.main import app
 
 
 def test_auth_required():
-    client = TestClient(app)
-    r = client.get('/v1/catalog')
-    assert r.status_code == 401
+    with TestClient(app) as client:
+        r = client.get('/v1/catalog')
+        assert r.status_code == 401

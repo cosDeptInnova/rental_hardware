@@ -110,7 +110,7 @@ def gpu0_snapshot(payload: GpuSnapshotRequest, request: Request, db: Session = D
 
 @router.post("/internal/gpu/0/release")
 def gpu0_release(payload: GpuReleaseRequest, request: Request, db: Session = Depends(get_db)):
-    return release_capacity(
+    result = release_capacity(
         db,
         target_free_vram_mib=payload.target_free_vram_mib,
         safety_margin_mib=payload.safety_margin_mib,
@@ -119,6 +119,9 @@ def gpu0_release(payload: GpuReleaseRequest, request: Request, db: Session = Dep
         tenant_id=payload.tenant_id,
         request_id=getattr(request.state, "request_id", None),
     )
+    if not payload.dry_run and not result.get("target_reached"):
+        raise HTTPException(status_code=409, detail=result)
+    return result
 
 
 @router.post("/internal/gpu/0/restore")
