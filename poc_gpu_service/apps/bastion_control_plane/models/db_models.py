@@ -35,6 +35,7 @@ class BackendInstance(Base):
     port: Mapped[int] = mapped_column(Integer)
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="starting")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -57,6 +58,7 @@ class Lease(Base):
     assigned_backend_instance_id: Mapped[str] = mapped_column(String(100))
     endpoint_path: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(50), default="active")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
