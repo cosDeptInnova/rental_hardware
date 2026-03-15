@@ -7,13 +7,23 @@
     "source_ref": "meta-llama/Meta-Llama-3-8B-Instruct",
     "revision": "main",
     "local_path": "llama3-8b-instruct.gguf",
-    "file_patterns": ["*.gguf"],
+    "file_patterns": [
+      "*.gguf"
+    ],
     "checksum": null,
     "estimated_vram_mib": 18000,
     "default_ctx_size": 4096,
-    "allowed_tenants": ["cliente1", "interno"],
+    "allowed_tenants": [
+      "cliente1",
+      "interno"
+    ],
     "enabled": true,
-    "notes": "PoC model for chat"
+    "notes": "PoC model for chat",
+    "drainable": false,
+    "critical": true,
+    "service_tier": "production_replicas",
+    "preferred_gpu": "CUDA1",
+    "restore_priority": 50
   },
   {
     "model_alias": "mistral-7b-instruct",
@@ -23,13 +33,22 @@
     "source_ref": "D:/models/mistral-7b-instruct.gguf",
     "revision": "n/a",
     "local_path": "mistral-7b-instruct.gguf",
-    "file_patterns": ["*.gguf"],
+    "file_patterns": [
+      "*.gguf"
+    ],
     "checksum": null,
     "estimated_vram_mib": 14000,
     "default_ctx_size": 4096,
-    "allowed_tenants": ["interno"],
+    "allowed_tenants": [
+      "interno"
+    ],
     "enabled": true,
-    "notes": "Internal-only test model"
+    "notes": "Internal-only test model",
+    "drainable": true,
+    "critical": false,
+    "service_tier": "internal",
+    "preferred_gpu": "CUDA1",
+    "restore_priority": 100
   },
   {
     "model_alias": "bge-small-embeddings",
@@ -43,8 +62,16 @@
     "checksum": null,
     "estimated_vram_mib": 2000,
     "default_ctx_size": 512,
-    "allowed_tenants": ["cliente1", "interno"],
+    "allowed_tenants": [
+      "cliente1",
+      "interno"
+    ],
     "enabled": true,
-    "notes": "Embeddings stub in PoC"
+    "notes": "Embeddings stub in PoC",
+    "drainable": true,
+    "critical": false,
+    "service_tier": "internal",
+    "preferred_gpu": "CUDA1",
+    "restore_priority": 100
   }
 ]

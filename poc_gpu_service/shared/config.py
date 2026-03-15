@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     cost_per_gb_network_egress: float = 0.05
     cost_per_kwh_gpu: float = 0.25
 
+    enable_gpu0_handoff: bool = True
+    client_gpu0_target_free_vram_mib: int = 16000
+    client_gpu0_safety_margin_mib: int = 2048
+    client_gpu0_drain_timeout_seconds: int = 30
+    client_gpu0_restore_on_disconnect: bool = True
+    drainable_backend_tags: str = "production_replicas,internal_non_critical"
+    non_drainable_process_patterns: str = "nvidia|system|display|dwm"
+
     @property
     def parsed_api_keys(self) -> list[str]:
         return [k.strip() for k in self.bastion_api_keys.split(",") if k.strip()]

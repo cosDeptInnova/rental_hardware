@@ -1,21 +1,34 @@
 from datetime import datetime
 import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
-from shared.config import get_settings
-from shared.utils.catalog import CatalogService
+
 from apps.bastion_control_plane.db.session import get_db
 from apps.bastion_control_plane.models.db_models import ApiKey, Lease, RequestLog
-from apps.bastion_control_plane.schemas.common import EnsureModelRequest, LeaseCreateRequest, ChatRequest, EmbeddingsRequest
+from apps.bastion_control_plane.schemas.common import (
+    EnsureModelRequest,
+    LeaseCreateRequest,
+    LeaseCloseRequest,
+    ChatRequest,
+    EmbeddingsRequest,
+    GpuSnapshotRequest,
+    GpuReleaseRequest,
+    GpuRestoreRequest,
+)
 from apps.bastion_control_plane.services.auth import require_api_key
+from apps.bastion_control_plane.services.capacity_manager import CapacityManager
 from apps.bastion_control_plane.services.costing import estimate_cost
 from apps.bastion_control_plane.services.gpu_agent_client import GpuAgentClient
+from shared.config import get_settings
+from shared.utils.catalog import CatalogService
 
 router = APIRouter()
 settings = get_settings()
 cat = CatalogService(settings.catalog_path, settings.model_storage_root)
 client = GpuAgentClient()
+capacity_manager = CapacityManager()
 
 
 @router.get("/health")
@@ -41,26 +54,54 @@ async def create_lease(payload: LeaseCreateRequest, db: Session = Depends(get_db
     ok, msg = cat.validate_deployable(payload.model_alias, api_key.tenant_id)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
-    backend = await client.call("POST", "/internal/backends/start", {
-        "model_alias": payload.model_alias,
-        "tenant_id": api_key.tenant_id,
-        "task_type": payload.task_type,
-        "gpu_preference": payload.requested_gpu or settings.default_gpu_device_for_client,
-    })
+
     lease_id = f"lease-{datetime.utcnow().timestamp():.0f}"
+    requested_gpu = payload.requested_gpu or settings.default_gpu_device_for_client
+
+    handoff = None
+    if requested_gpu == "CUDA0" and settings.enable_gpu0_handoff:
+        handoff = await capacity_manager.on_lease_create(lease_id=lease_id, tenant_id=api_key.tenant_id, requested_gpu=requested_gpu)
+        if not handoff.get("release", {}).get("target_reached", True):
+            raise HTTPException(status_code=409, detail={"message": "Insufficient safe free capacity on GPU0", "handoff": handoff})
+
+    backend = await client.call(
+        "POST",
+        "/internal/backends/start",
+        {
+            "model_alias": payload.model_alias,
+            "tenant_id": api_key.tenant_id,
+            "task_type": payload.task_type,
+            "gpu_preference": requested_gpu,
+        },
+    )
+
     lease = Lease(
         lease_id=lease_id,
         tenant_id=api_key.tenant_id,
         model_alias=payload.model_alias,
         task_type=payload.task_type,
-        requested_gpu=payload.requested_gpu or settings.default_gpu_device_for_client,
+        requested_gpu=requested_gpu,
         assigned_backend_instance_id=backend["instance_id"],
         endpoint_path=f"/v1/{payload.task_type if payload.task_type!='chat' else 'chat/completions'}",
         status="active",
     )
     db.add(lease)
     db.commit()
-    return {"lease_id": lease_id, "backend": backend, "status": "active"}
+    return {"lease_id": lease_id, "backend": backend, "status": "active", "handoff": handoff}
+
+
+@router.post("/v1/leases/close")
+async def close_lease(payload: LeaseCloseRequest, db: Session = Depends(get_db), api_key: ApiKey = Depends(require_api_key)):
+    lease = db.scalar(select(Lease).where(Lease.lease_id == payload.lease_id, Lease.tenant_id == api_key.tenant_id))
+    if not lease:
+        raise HTTPException(status_code=404, detail="Lease not found")
+
+    stop_result = await client.call("POST", "/internal/backends/stop", {"instance_id": lease.assigned_backend_instance_id})
+    lease.status = "closed"
+    lease.expires_at = datetime.utcnow()
+    db.commit()
+    restore = await capacity_manager.on_lease_close(lease.lease_id)
+    return {"ok": True, "lease_id": lease.lease_id, "stop": stop_result, "restore": restore}
 
 
 @router.get("/v1/leases")
@@ -142,3 +183,58 @@ def audit_request(request_id: str, db: Session = Depends(get_db), api_key: ApiKe
     if not log:
         raise HTTPException(status_code=404, detail="request_id not found")
     return log.__dict__
+
+
+@router.post("/v1/admin/gpu0/snapshot")
+async def admin_snapshot(payload: GpuSnapshotRequest, api_key: ApiKey = Depends(require_api_key)):
+    return await client.call("POST", "/internal/gpu/0/snapshot", payload.model_dump())
+
+
+@router.post("/v1/admin/gpu0/release")
+async def admin_release(payload: GpuReleaseRequest, api_key: ApiKey = Depends(require_api_key)):
+    return await client.call("POST", "/internal/gpu/0/release", payload.model_dump())
+
+
+@router.post("/v1/admin/gpu0/restore")
+async def admin_restore(payload: GpuRestoreRequest, api_key: ApiKey = Depends(require_api_key)):
+    return await client.call("POST", "/internal/gpu/0/restore", payload.model_dump())
+
+
+@router.get("/v1/admin/gpu0/status")
+async def admin_status(api_key: ApiKey = Depends(require_api_key)):
+    return await client.call("GET", "/internal/gpu/0/status")
+
+
+@router.get("/v1/admin/gpu0/snapshots")
+async def admin_snapshots(api_key: ApiKey = Depends(require_api_key)):
+    return await client.call("GET", "/internal/gpu/0/snapshots")
+
+
+@router.get("/v1/admin/gpu0/handoff-events")
+async def admin_handoff_events(api_key: ApiKey = Depends(require_api_key)):
+    return await client.call("GET", "/internal/gpu/0/handoff-events")
+
+
+@router.get("/v1/demo/status")
+async def demo_status(db: Session = Depends(get_db), api_key: ApiKey = Depends(require_api_key)):
+    status = await client.call("GET", "/internal/gpu/0/status")
+    leases = db.scalars(select(Lease).where(Lease.status == "active").order_by(Lease.created_at.desc())).all()
+    snapshots_resp = await client.call("GET", "/internal/gpu/0/snapshots")
+    events_resp = await client.call("GET", "/internal/gpu/0/handoff-events")
+    snapshots = snapshots_resp.get("items", [])
+    events = events_resp.get("items", [])
+    release_actions = [e for e in events if e.get("action_type") in {"drain", "stop_backend", "warn"}][:10]
+    restore_actions = [e for e in events if e.get("action_type") in {"restore", "start_backend"}][:10]
+    gpu_status = status.get("status", {})
+    return {
+        "gpu0": {
+            "free_mib": gpu_status.get("memory_free_mib"),
+            "used_mib": gpu_status.get("memory_used_mib"),
+            "reserved_target_mib": gpu_status.get("required_free_vram_mib"),
+            "target_satisfiable": gpu_status.get("target_satisfiable"),
+        },
+        "active_leases": [l.__dict__ for l in leases],
+        "last_snapshot": snapshots[0] if snapshots else None,
+        "last_release_actions": release_actions,
+        "last_restore_actions": restore_actions,
+    }

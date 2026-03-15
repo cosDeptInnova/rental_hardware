@@ -30,3 +30,23 @@ class ChatInferRequest(BaseModel):
 class EmbeddingsInferRequest(BaseModel):
     lease_id: str
     input: str | list[str]
+
+
+class GpuSnapshotRequest(BaseModel):
+    lease_id: str | None = None
+    tenant_id: str | None = None
+    notes: str | None = None
+
+
+class GpuReleaseRequest(BaseModel):
+    lease_id: str | None = None
+    tenant_id: str | None = None
+    target_free_vram_mib: int | None = None
+    safety_margin_mib: int | None = None
+    dry_run: bool = True
+
+
+class GpuRestoreRequest(BaseModel):
+    snapshot_id: str | None = None
+    lease_id: str | None = None
+    dry_run: bool = True
