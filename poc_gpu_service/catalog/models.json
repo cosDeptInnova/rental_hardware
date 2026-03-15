@@ -1,0 +1,50 @@
+[
+  {
+    "model_alias": "llama3-8b-instruct",
+    "task_type": "chat",
+    "engine": "llama_cpp",
+    "source_type": "huggingface",
+    "source_ref": "meta-llama/Meta-Llama-3-8B-Instruct",
+    "revision": "main",
+    "local_path": "llama3-8b-instruct.gguf",
+    "file_patterns": ["*.gguf"],
+    "checksum": null,
+    "estimated_vram_mib": 18000,
+    "default_ctx_size": 4096,
+    "allowed_tenants": ["cliente1", "interno"],
+    "enabled": true,
+    "notes": "PoC model for chat"
+  },
+  {
+    "model_alias": "mistral-7b-instruct",
+    "task_type": "chat",
+    "engine": "llama_cpp",
+    "source_type": "local",
+    "source_ref": "D:/models/mistral-7b-instruct.gguf",
+    "revision": "n/a",
+    "local_path": "mistral-7b-instruct.gguf",
+    "file_patterns": ["*.gguf"],
+    "checksum": null,
+    "estimated_vram_mib": 14000,
+    "default_ctx_size": 4096,
+    "allowed_tenants": ["interno"],
+    "enabled": true,
+    "notes": "Internal-only test model"
+  },
+  {
+    "model_alias": "bge-small-embeddings",
+    "task_type": "embeddings",
+    "engine": "embeddings_stub",
+    "source_type": "huggingface",
+    "source_ref": "BAAI/bge-small-en-v1.5",
+    "revision": "main",
+    "local_path": "bge-small",
+    "file_patterns": null,
+    "checksum": null,
+    "estimated_vram_mib": 2000,
+    "default_ctx_size": 512,
+    "allowed_tenants": ["cliente1", "interno"],
+    "enabled": true,
+    "notes": "Embeddings stub in PoC"
+  }
+]
