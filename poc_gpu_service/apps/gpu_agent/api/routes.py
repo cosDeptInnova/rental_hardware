@@ -1,18 +1,30 @@
 import json
 from datetime import datetime
+
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from shared.config import get_settings
-from shared.utils.catalog import CatalogService
+
 from apps.gpu_agent.db.session import get_db
-from apps.gpu_agent.models.db_models import BackendInstance, GpuSample, ProcessSample
-from apps.gpu_agent.schemas.common import EnsureModelRequest, StartBackendRequest, StopBackendRequest, ChatInferRequest, EmbeddingsInferRequest
+from apps.gpu_agent.models.db_models import BackendInstance, GpuSample, ProcessSample, GpuStateSnapshot, HandoffEvent
+from apps.gpu_agent.schemas.common import (
+    EnsureModelRequest,
+    StartBackendRequest,
+    StopBackendRequest,
+    ChatInferRequest,
+    EmbeddingsInferRequest,
+    GpuSnapshotRequest,
+    GpuReleaseRequest,
+    GpuRestoreRequest,
+)
 from apps.gpu_agent.services.auth import require_internal_token
 from apps.gpu_agent.services.backend_service import start_backend, stop_backend
+from apps.gpu_agent.services.capacity_handoff_service import create_snapshot, release_capacity, restore_state, _gpu0_status_payload
 from apps.gpu_agent.services.metrics_service import collect_gpu_metrics
 from apps.gpu_agent.services.model_service import ensure_model
+from shared.config import get_settings
+from shared.utils.catalog import CatalogService
 
 router = APIRouter(dependencies=[Depends(require_internal_token)])
 settings = get_settings()
@@ -80,6 +92,53 @@ def process_metrics(db: Session = Depends(get_db)):
     db.add(ProcessSample(timestamp=datetime.utcnow(), payload_json=json.dumps(data)))
     db.commit()
     return {"timestamp": datetime.utcnow().isoformat(), "processes": data}
+
+
+@router.get("/internal/gpu/0/status")
+def gpu0_status(db: Session = Depends(get_db)):
+    latest = db.scalar(select(GpuStateSnapshot).order_by(GpuStateSnapshot.created_at.desc()))
+    return {
+        "status": _gpu0_status_payload(),
+        "latest_snapshot": latest.__dict__ if latest else None,
+    }
+
+
+@router.post("/internal/gpu/0/snapshot")
+def gpu0_snapshot(payload: GpuSnapshotRequest, request: Request, db: Session = Depends(get_db)):
+    return create_snapshot(db, lease_id=payload.lease_id, tenant_id=payload.tenant_id, notes=payload.notes, request_id=getattr(request.state, "request_id", None))
+
+
+@router.post("/internal/gpu/0/release")
+def gpu0_release(payload: GpuReleaseRequest, request: Request, db: Session = Depends(get_db)):
+    result = release_capacity(
+        db,
+        target_free_vram_mib=payload.target_free_vram_mib,
+        safety_margin_mib=payload.safety_margin_mib,
+        dry_run=payload.dry_run,
+        lease_id=payload.lease_id,
+        tenant_id=payload.tenant_id,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    if not payload.dry_run and not result.get("target_reached"):
+        raise HTTPException(status_code=409, detail=result)
+    return result
+
+
+@router.post("/internal/gpu/0/restore")
+def gpu0_restore(payload: GpuRestoreRequest, request: Request, db: Session = Depends(get_db)):
+    return restore_state(db, snapshot_id=payload.snapshot_id, lease_id=payload.lease_id, dry_run=payload.dry_run, request_id=getattr(request.state, "request_id", None))
+
+
+@router.get("/internal/gpu/0/snapshots")
+def gpu0_snapshots(db: Session = Depends(get_db)):
+    rows = db.scalars(select(GpuStateSnapshot).order_by(GpuStateSnapshot.created_at.desc()).limit(100)).all()
+    return {"items": [r.__dict__ for r in rows]}
+
+
+@router.get("/internal/gpu/0/handoff-events")
+def gpu0_handoff_events(db: Session = Depends(get_db)):
+    rows = db.scalars(select(HandoffEvent).order_by(HandoffEvent.id.desc()).limit(200)).all()
+    return {"items": [r.__dict__ for r in rows]}
 
 
 @router.post("/internal/infer/chat")

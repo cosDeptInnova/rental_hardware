@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -36,6 +36,15 @@ class BackendInstance(Base):
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="starting")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_healthcheck_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    drainable: Mapped[bool] = mapped_column(Boolean, default=True)
+    critical: Mapped[bool] = mapped_column(Boolean, default=False)
+    service_tier: Mapped[str] = mapped_column(String(50), default="standard")
+    preferred_gpu: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    restore_priority: Mapped[int] = mapped_column(Integer, default=100)
 
 
 class Lease(Base):
@@ -77,3 +86,25 @@ class RequestLog(Base):
     cpu_system_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     ram_rss_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     notes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class GpuStateSnapshot(Base):
+    __tablename__ = "gpu_state_snapshots"
+    snapshot_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    lease_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    gpu_index: Mapped[int] = mapped_column(Integer)
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class HandoffEvent(Base):
+    __tablename__ = "handoff_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    lease_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    action_type: Mapped[str] = mapped_column(String(50), index=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    details_json: Mapped[str] = mapped_column(Text)
