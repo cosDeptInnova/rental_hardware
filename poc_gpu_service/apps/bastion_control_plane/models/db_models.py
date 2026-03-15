@@ -37,6 +37,10 @@ class BackendInstance(Base):
     status: Mapped[str] = mapped_column(String(50), default="starting")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_healthcheck_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    extra_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     drainable: Mapped[bool] = mapped_column(Boolean, default=True)
     critical: Mapped[bool] = mapped_column(Boolean, default=False)
     service_tier: Mapped[str] = mapped_column(String(50), default="standard")
