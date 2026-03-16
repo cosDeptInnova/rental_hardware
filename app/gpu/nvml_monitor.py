@@ -32,6 +32,11 @@ class NvmlMonitor:
             self._available = False
         return self
 
+
+    @property
+    def available(self) -> bool:
+        return getattr(self, "_available", False)
+
     def __exit__(self, exc_type, exc, tb) -> None:
         if not getattr(self, "_available", False):
             return

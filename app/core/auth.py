@@ -13,6 +13,10 @@ from app.core.db import get_db
 from app.core.models import Tenant
 
 
+def generate_api_key() -> str:
+    return secrets.token_urlsafe(32)
+
+
 def hash_api_key(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

@@ -1,17 +1,38 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.auth import require_admin
+from app.core.auth import generate_api_key, hash_api_key, require_admin
 from app.core.db import get_db
 from app.core.models import Reservation, Tenant
-from app.core.schemas import CapacityRead, ReservationCreate, ReservationRead
+from app.core.schemas import CapacityRead, ReservationCreate, ReservationRead, TenantCreate, TenantCreateRead
 from app.gpu.nvml_monitor import NvmlMonitor
 
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
+
+
+@router.post("/tenants", response_model=TenantCreateRead, status_code=status.HTTP_201_CREATED)
+def create_tenant(
+    payload: TenantCreate,
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> TenantCreateRead:
+    api_key = generate_api_key()
+    tenant = Tenant(name=payload.name, api_key_hash=hash_api_key(api_key), status="active")
+    db.add(tenant)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="tenant_already_exists") from None
+
+    db.refresh(tenant)
+    return TenantCreateRead(tenant_id=tenant.id, name=tenant.name, api_key=api_key)
 
 
 @router.post("/reservations", response_model=ReservationRead)
@@ -65,5 +86,10 @@ def upsert_reservation(
 @router.get("/capacity", response_model=list[CapacityRead])
 def capacity(_: None = Depends(require_admin)) -> list[CapacityRead]:
     with NvmlMonitor() as mon:
+        if not mon.available:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="nvml_unavailable: NVIDIA NVML no está disponible en este entorno",
+            )
         items = mon.snapshots()
     return [CapacityRead(**item.__dict__) for item in items]
