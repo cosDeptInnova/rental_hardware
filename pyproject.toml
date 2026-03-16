@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpu-broker"
+version = "0.1.0"
+description = "Multi-tenant GPU broker for managed compute rentals on Windows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "sqlalchemy>=2.0",
+  "pydantic>=2.8",
+  "psutil>=5.9",
+  "nvidia-ml-py>=13.580",
+  "pywin32>=306; platform_system == 'Windows'",
+  "redis>=5.0",
+  "httpx>=0.27",
+  "pytest>=8.0"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
