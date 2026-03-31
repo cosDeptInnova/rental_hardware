@@ -136,3 +136,16 @@ class AnalyticsSummaryRead(BaseModel):
     total_tokens_total: int
     avg_latency_ms: float
     by_service: list[AnalyticsServiceBreakdown]
+    by_state: dict[str, int] = Field(default_factory=dict)
+
+
+class QuotaConfig(BaseModel):
+    requests_per_day: int = Field(ge=0, default=0)
+    requests_per_month: int = Field(ge=0, default=0)
+    tokens_per_day: int = Field(ge=0, default=0)
+    tokens_per_month: int = Field(ge=0, default=0)
+
+
+class SessionStateRead(BaseModel):
+    tenant_id: str
+    revoked: bool

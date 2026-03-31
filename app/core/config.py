@@ -14,6 +14,7 @@ class Settings:
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
     llama_server_url: str = os.getenv("LLAMA_SERVER_URL", "")
+    redis_url: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 
 settings = Settings()

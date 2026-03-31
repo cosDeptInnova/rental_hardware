@@ -22,10 +22,22 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       ENVIRONMENT: prod
+      REDIS_URL: redis://redis:6379/0
       # Si se usa llama.cpp externo, descomentar y apuntar al endpoint.
       # LLAMA_SERVER_URL: http://llama-server:8080
     expose:
       - "8000"
+    networks:
+      - backend
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    expose:
+      - "6379"
     networks:
       - backend
     restart: unless-stopped

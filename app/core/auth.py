@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.models import Tenant
+from app.services.session_control import session_control
 
 
 def generate_api_key() -> str:
@@ -33,6 +34,8 @@ def get_current_tenant(
     tenant = db.execute(stmt).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_api_key")
+    if session_control.is_revoked(tenant.id):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session_revoked")
     return tenant
 
 

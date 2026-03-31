@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_tenant
 from app.core.db import get_db
-from app.core.models import Job, RequestMetric, Reservation, Tenant
+from app.core.models import Job, RequestMetric, Reservation, Tenant, TenantQuota
 from app.core.schemas import (
     AnalyticsServiceBreakdown,
     AnalyticsSummaryRead,
@@ -60,6 +62,47 @@ def _create_job(
 
     if reservation is None:
         raise HTTPException(status_code=403, detail="tenant_has_no_reservation")
+
+    quota = db.execute(select(TenantQuota).where(TenantQuota.tenant_id == tenant.id)).scalar_one_or_none()
+    if quota is not None:
+        now = datetime.now(timezone.utc)
+        day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+
+        reqs_day = db.execute(
+            select(func.count(RequestMetric.id)).where(
+                RequestMetric.tenant_id == tenant.id,
+                RequestMetric.created_at >= day_start,
+            )
+        ).scalar_one()
+        reqs_month = db.execute(
+            select(func.count(RequestMetric.id)).where(
+                RequestMetric.tenant_id == tenant.id,
+                RequestMetric.created_at >= month_start,
+            )
+        ).scalar_one()
+        tokens_day = db.execute(
+            select(func.sum(RequestMetric.total_tokens)).where(
+                RequestMetric.tenant_id == tenant.id,
+                RequestMetric.created_at >= day_start,
+            )
+        ).scalar_one()
+        tokens_month = db.execute(
+            select(func.sum(RequestMetric.total_tokens)).where(
+                RequestMetric.tenant_id == tenant.id,
+                RequestMetric.created_at >= month_start,
+            )
+        ).scalar_one()
+
+        if quota.requests_per_day > 0 and int(reqs_day or 0) >= quota.requests_per_day:
+            raise HTTPException(status_code=429, detail="quota_requests_per_day_exceeded")
+        if quota.requests_per_month > 0 and int(reqs_month or 0) >= quota.requests_per_month:
+            raise HTTPException(status_code=429, detail="quota_requests_per_month_exceeded")
+        estimated_tokens = max(len(str(payload.payload)) // 4, 1)
+        if quota.tokens_per_day > 0 and int(tokens_day or 0) + estimated_tokens > quota.tokens_per_day:
+            raise HTTPException(status_code=429, detail="quota_tokens_per_day_exceeded")
+        if quota.tokens_per_month > 0 and int(tokens_month or 0) + estimated_tokens > quota.tokens_per_month:
+            raise HTTPException(status_code=429, detail="quota_tokens_per_month_exceeded")
 
     active_jobs = db.execute(
         select(func.count(Job.id)).where(
@@ -299,6 +342,11 @@ def analytics_summary(
         .where(RequestMetric.tenant_id == tenant.id)
         .group_by(RequestMetric.service_type)
     ).all()
+    by_state_rows = db.execute(
+        select(RequestMetric.state, func.count(RequestMetric.id))
+        .where(RequestMetric.tenant_id == tenant.id)
+        .group_by(RequestMetric.state)
+    ).all()
 
     by_service = [
         AnalyticsServiceBreakdown(
@@ -325,4 +373,5 @@ def analytics_summary(
         total_tokens_total=int(totals[5] or 0),
         avg_latency_ms=float(totals[6] or 0),
         by_service=by_service,
+        by_state={str(row[0]): int(row[1] or 0) for row in by_state_rows},
     )

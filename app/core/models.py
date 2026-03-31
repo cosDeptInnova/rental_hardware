@@ -106,3 +106,14 @@ class RequestMetric(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class TenantQuota(Base):
+    __tablename__ = "tenant_quotas"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), unique=True, nullable=False)
+    requests_per_day: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    requests_per_month: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tokens_per_day: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tokens_per_month: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
