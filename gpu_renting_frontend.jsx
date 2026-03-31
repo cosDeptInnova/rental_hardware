@@ -32,8 +32,8 @@ const modelCatalog = [
 ];
 
 const serviceMeta = {
-  inference: { label: "Inferencia", icon: Sparkles, endpoint: "/v1/inference" },
-  embeddings: { label: "Embeddings", icon: Database, endpoint: "/v1/embeddings" },
+  inference: { label: "Inferencia", icon: Sparkles, endpoint: "/inference" },
+  embeddings: { label: "Embeddings", icon: Database, endpoint: "/embeddings" },
 };
 
 function slugify(v) {
@@ -66,7 +66,7 @@ async function api(url, options = {}) {
 }
 
 export default function GpuRentingFrontend() {
-  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8000");
+  const [apiBasePath, setApiBasePath] = useState("/broker-api");
   const [adminToken, setAdminToken] = useState("change-me");
   const [tenantName, setTenantName] = useState("Cliente Demo");
   const [service, setService] = useState("inference");
@@ -95,7 +95,7 @@ export default function GpuRentingFrontend() {
     [compatibleModels, model]
   );
 
-  const backendEndpoint = useMemo(() => `${baseUrl}${serviceMeta[service].endpoint}`, [baseUrl, service]);
+  const backendEndpoint = useMemo(() => `${apiBasePath}${serviceMeta[service].endpoint}`, [apiBasePath, service]);
 
   const canDeploy = vram[0] >= (selectedModel?.minVram || 0);
 
@@ -103,7 +103,7 @@ export default function GpuRentingFrontend() {
     setError("");
     setDeployLoading(true);
     try {
-      const tenant = await api(`${baseUrl}/v1/admin/tenants`, {
+      const tenant = await api(`${apiBasePath}/admin/tenants`, {
         method: "POST",
         headers: { "X-Admin-Token": adminToken },
         body: JSON.stringify({ name: tenantName || slugify(tenantName) }),
@@ -119,7 +119,7 @@ export default function GpuRentingFrontend() {
         enabled: true,
       };
 
-      await api(`${baseUrl}/v1/admin/reservations`, {
+      await api(`${apiBasePath}/admin/reservations`, {
         method: "POST",
         headers: { "X-Admin-Token": adminToken },
         body: JSON.stringify(reservation),
@@ -139,7 +139,7 @@ export default function GpuRentingFrontend() {
     setInvokeLoading(true);
     try {
       const payload = JSON.parse(requestJson);
-      const body = await api(`${baseUrl}${serviceMeta[service].endpoint}`, {
+      const body = await api(`${apiBasePath}${serviceMeta[service].endpoint}`, {
         method: "POST",
         headers: { "X-API-Key": apiKey },
         body: JSON.stringify({
@@ -162,7 +162,7 @@ export default function GpuRentingFrontend() {
     if (!apiKey) return;
     setAnalyticsLoading(true);
     try {
-      const body = await api(`${baseUrl}/v1/analytics/summary`, {
+      const body = await api(`${apiBasePath}/analytics/summary`, {
         headers: { "X-API-Key": apiKey },
       });
       setAnalytics(body);
@@ -213,8 +213,8 @@ export default function GpuRentingFrontend() {
             <CardContent className="space-y-6">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
-                  <Label>Base URL backend</Label>
-                  <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className="rounded-2xl" />
+                  <Label>API path vía Nginx</Label>
+                  <Input value={apiBasePath} onChange={(e) => setApiBasePath(e.target.value)} className="rounded-2xl" />
                 </div>
                 <div className="space-y-2">
                   <Label>Admin token</Label>

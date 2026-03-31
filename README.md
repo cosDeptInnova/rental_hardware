@@ -18,6 +18,11 @@ Broker multi-tenant para alquilar capacidad GPU como servicio gestionado por API
 - Analytics para front:
   - `GET /v1/analytics/summary` (por tenant).
   - `GET /v1/admin/analytics/summary` (global admin).
+- Cuotas por tenant (día/mes) para requests y tokens:
+  - `PUT /v1/admin/quotas/{tenant_id}`.
+- Control de sesión en Redis para expulsar/restaurar tenants:
+  - `POST /v1/admin/sessions/{tenant_id}/revoke`.
+  - `POST /v1/admin/sessions/{tenant_id}/restore`.
 
 ## Integración con llama.cpp
 
@@ -36,6 +41,11 @@ Se incluye:
 - `Dockerfile` para `api`.
 - `docker-compose.yml` con red `backend` marcada como `internal: true`.
 - `nginx.conf` como reverse proxy hacia `api:8000`.
+
+Para este broker también queda un path dedicado en Nginx:
+
+- Frontend llama a `/broker-api/*` (mismo host de Nginx).
+- Nginx traduce `/broker-api/*` -> `api:8000/v1/*`.
 
 ## Arranque local (desarrollo Python)
 
@@ -57,7 +67,7 @@ Checks rápidos:
 
 ```bash
 curl -sS http://localhost/health
-curl -sS http://localhost/v1/analytics/summary -H 'X-Tenant-Id: demo'
+curl -sS http://localhost/broker-health
 ```
 
 ## Verificación de aislamiento de red

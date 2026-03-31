@@ -9,18 +9,21 @@ from app.core.auth import generate_api_key, hash_api_key, require_admin
 from app.core.db import get_db
 from sqlalchemy import case, func
 
-from app.core.models import RequestMetric, Reservation, Tenant
+from app.core.models import RequestMetric, Reservation, Tenant, TenantQuota
 from app.core.schemas import (
     AnalyticsServiceBreakdown,
     AnalyticsSummaryRead,
     CapacityRead,
     ReservationCreate,
     ReservationRead,
+    QuotaConfig,
+    SessionStateRead,
     ServiceType,
     TenantCreate,
     TenantCreateRead,
 )
 from app.gpu.nvml_monitor import NvmlMonitor
+from app.services.session_control import session_control
 
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
@@ -133,6 +136,9 @@ def admin_analytics_summary(
             func.avg(RequestMetric.latency_ms),
         ).group_by(RequestMetric.service_type)
     ).all()
+    by_state_rows = db.execute(
+        select(RequestMetric.state, func.count(RequestMetric.id)).group_by(RequestMetric.state)
+    ).all()
 
     by_service = [
         AnalyticsServiceBreakdown(
@@ -159,4 +165,55 @@ def admin_analytics_summary(
         total_tokens_total=int(totals[5] or 0),
         avg_latency_ms=float(totals[6] or 0),
         by_service=by_service,
+        by_state={str(row[0]): int(row[1] or 0) for row in by_state_rows},
     )
+
+
+@router.put("/quotas/{tenant_id}", response_model=QuotaConfig)
+def upsert_quota(
+    tenant_id: str,
+    payload: QuotaConfig,
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> QuotaConfig:
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+
+    quota = db.execute(select(TenantQuota).where(TenantQuota.tenant_id == tenant_id)).scalar_one_or_none()
+    if quota is None:
+        quota = TenantQuota(tenant_id=tenant_id)
+        db.add(quota)
+
+    quota.requests_per_day = payload.requests_per_day
+    quota.requests_per_month = payload.requests_per_month
+    quota.tokens_per_day = payload.tokens_per_day
+    quota.tokens_per_month = payload.tokens_per_month
+    db.commit()
+    return payload
+
+
+@router.post("/sessions/{tenant_id}/revoke", response_model=SessionStateRead)
+def revoke_tenant_session(
+    tenant_id: str,
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> SessionStateRead:
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+    session_control.revoke(tenant_id)
+    return SessionStateRead(tenant_id=tenant_id, revoked=True)
+
+
+@router.post("/sessions/{tenant_id}/restore", response_model=SessionStateRead)
+def restore_tenant_session(
+    tenant_id: str,
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> SessionStateRead:
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+    session_control.restore(tenant_id)
+    return SessionStateRead(tenant_id=tenant_id, revoked=False)
