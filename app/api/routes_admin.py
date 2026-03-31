@@ -7,8 +7,19 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import generate_api_key, hash_api_key, require_admin
 from app.core.db import get_db
-from app.core.models import Reservation, Tenant
-from app.core.schemas import CapacityRead, ReservationCreate, ReservationRead, TenantCreate, TenantCreateRead
+from sqlalchemy import case, func
+
+from app.core.models import RequestMetric, Reservation, Tenant
+from app.core.schemas import (
+    AnalyticsServiceBreakdown,
+    AnalyticsSummaryRead,
+    CapacityRead,
+    ReservationCreate,
+    ReservationRead,
+    ServiceType,
+    TenantCreate,
+    TenantCreateRead,
+)
 from app.gpu.nvml_monitor import NvmlMonitor
 
 
@@ -93,3 +104,59 @@ def capacity(_: None = Depends(require_admin)) -> list[CapacityRead]:
             )
         items = mon.snapshots()
     return [CapacityRead(**item.__dict__) for item in items]
+
+
+@router.get("/analytics/summary", response_model=AnalyticsSummaryRead)
+def admin_analytics_summary(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AnalyticsSummaryRead:
+    totals = db.execute(
+        select(
+            func.count(RequestMetric.id),
+            func.sum(case((RequestMetric.status_code < 400, 1), else_=0)),
+            func.sum(case((RequestMetric.status_code >= 400, 1), else_=0)),
+            func.sum(RequestMetric.request_tokens),
+            func.sum(RequestMetric.response_tokens),
+            func.sum(RequestMetric.total_tokens),
+            func.avg(RequestMetric.latency_ms),
+        )
+    ).one()
+
+    by_service_rows = db.execute(
+        select(
+            RequestMetric.service_type,
+            func.count(RequestMetric.id),
+            func.sum(RequestMetric.request_tokens),
+            func.sum(RequestMetric.response_tokens),
+            func.sum(RequestMetric.total_tokens),
+            func.avg(RequestMetric.latency_ms),
+        ).group_by(RequestMetric.service_type)
+    ).all()
+
+    by_service = [
+        AnalyticsServiceBreakdown(
+            service_type=ServiceType(row[0]),
+            requests=int(row[1] or 0),
+            request_tokens=int(row[2] or 0),
+            response_tokens=int(row[3] or 0),
+            total_tokens=int(row[4] or 0),
+            avg_latency_ms=float(row[5] or 0),
+        )
+        for row in by_service_rows
+    ]
+
+    return AnalyticsSummaryRead(
+        requests_total=int(totals[0] or 0),
+        success_total=int(totals[1] or 0),
+        failed_total=int(totals[2] or 0),
+        queued_total=0,
+        running_total=0,
+        finished_total=0,
+        failed_jobs_total=0,
+        request_tokens_total=int(totals[3] or 0),
+        response_tokens_total=int(totals[4] or 0),
+        total_tokens_total=int(totals[5] or 0),
+        avg_latency_ms=float(totals[6] or 0),
+        by_service=by_service,
+    )

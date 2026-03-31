@@ -57,6 +57,7 @@ class JobCreate(BaseModel):
     requested_vram_mb: int = Field(gt=0)
     priority: int = Field(ge=0, le=100, default=50)
     payload: dict[str, Any] = Field(default_factory=dict)
+    model: str = Field(default="default-model")
 
 
 class JobRead(BaseModel):
@@ -87,3 +88,51 @@ class CapacityRead(BaseModel):
     used_mb: int
     free_mb: int
     gpu_util: int
+
+
+class InferenceRequest(BaseModel):
+    model: str
+    requested_vram_mb: int = Field(gt=0)
+    priority: int = Field(ge=0, le=100, default=50)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class EmbeddingsRequest(BaseModel):
+    model: str
+    requested_vram_mb: int = Field(gt=0)
+    priority: int = Field(ge=0, le=100, default=50)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ServiceResponse(BaseModel):
+    request_id: str
+    job_id: str
+    state: JobState
+    status_code: int
+    service_type: ServiceType
+    model: str
+    result: dict[str, Any]
+
+
+class AnalyticsServiceBreakdown(BaseModel):
+    service_type: ServiceType
+    requests: int
+    request_tokens: int
+    response_tokens: int
+    total_tokens: int
+    avg_latency_ms: float
+
+
+class AnalyticsSummaryRead(BaseModel):
+    requests_total: int
+    success_total: int
+    failed_total: int
+    queued_total: int
+    running_total: int
+    finished_total: int
+    failed_jobs_total: int
+    request_tokens_total: int
+    response_tokens_total: int
+    total_tokens_total: int
+    avg_latency_ms: float
+    by_service: list[AnalyticsServiceBreakdown]

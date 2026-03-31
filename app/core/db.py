@@ -29,3 +29,7 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+# Ensure tables exist for direct SessionLocal usage in tests/scripts.
+init_db()
