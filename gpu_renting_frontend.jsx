@@ -1,614 +1,431 @@
 import React, { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Cpu, Database, Globe, KeyRound, ServerCog, ShieldCheck, Sparkles, Zap, CheckCircle2, Copy, Rocket, Gauge, Layers3 } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Activity,
+  BarChart3,
+  CheckCircle2,
+  Clock3,
+  Copy,
+  Database,
+  KeyRound,
+  Rocket,
+  Sparkles,
+  Terminal,
+  Timer,
+} from "lucide-react";
+
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
-import { Separator } from "@/components/ui/separator";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
-const models = [
-  {
-    id: "gpt-oss-20b-gguf",
-    name: "GPT-OSS 20B GGUF",
-    type: "Inference",
-    minVram: 12,
-    recommendedVram: 20,
-    description: "Modelo conversacional servido sobre llama.cpp para inferencia gestionada.",
-    services: ["inference"],
-  },
-  {
-    id: "nomic-embed-text",
-    name: "Nomic Embed Text",
-    type: "Embeddings",
-    minVram: 4,
-    recommendedVram: 8,
-    description: "Servicio de embeddings para indexación, búsqueda semántica y RAG.",
-    services: ["embeddings", "rag"],
-  },
-  {
-    id: "bge-large-es",
-    name: "BGE Large ES",
-    type: "Embeddings / Rerank",
-    minVram: 6,
-    recommendedVram: 10,
-    description: "Embeddings de alta calidad para recuperación y pipelines RAG empresariales.",
-    services: ["embeddings", "rag"],
-  },
-  {
-    id: "mistral-7b-instruct",
-    name: "Mistral 7B Instruct",
-    type: "Inference",
-    minVram: 8,
-    recommendedVram: 12,
-    description: "Modelo ligero para asistentes, clasificación y generación de texto.",
-    services: ["inference", "rag"],
-  },
+const modelCatalog = [
+  { id: "mistral-7b-instruct", label: "Mistral 7B Instruct", minVram: 8, services: ["inference"] },
+  { id: "gpt-oss-20b-gguf", label: "GPT-OSS 20B GGUF", minVram: 14, services: ["inference"] },
+  { id: "nomic-embed-text", label: "Nomic Embed Text", minVram: 4, services: ["embeddings"] },
+  { id: "bge-large-es", label: "BGE Large ES", minVram: 6, services: ["embeddings"] },
 ];
 
-const serviceInfo = {
-  inference: {
-    label: "Inferencia",
-    icon: Sparkles,
-    endpoint: "/v1/chat/completions",
-    color: "Servicio gestionado",
-  },
-  embeddings: {
-    label: "Embeddings",
-    icon: Database,
-    endpoint: "/v1/embeddings",
-    color: "Vectorización",
-  },
-  rag: {
-    label: "RAG",
-    icon: Layers3,
-    endpoint: "/v1/rag/query",
-    color: "Recuperación + generación",
-  },
+const serviceMeta = {
+  inference: { label: "Inferencia", icon: Sparkles, endpoint: "/v1/inference" },
+  embeddings: { label: "Embeddings", icon: Database, endpoint: "/v1/embeddings" },
 };
 
-function makeSlug(input) {
-  return input
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "tenant-demo";
+function slugify(v) {
+  return (
+    v
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "tenant-demo"
+  );
 }
 
-function estimateMonthlyPrice({ vram, service, dedicated }) {
-  const base = dedicated ? 380 : 210;
-  const serviceFactor = service === "inference" ? 1.25 : service === "rag" ? 1.4 : 1.0;
-  const vramFactor = vram * 24;
-  return Math.round((base + vramFactor) * serviceFactor);
-}
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
 
-function estimateSetupPrice({ service, auth, privateNetwork }) {
-  let total = 450;
-  if (service === "rag") total += 200;
-  if (auth) total += 120;
-  if (privateNetwork) total += 180;
-  return total;
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = body?.detail || body?.error || `HTTP ${response.status}`;
+    throw new Error(typeof error === "string" ? error : JSON.stringify(error));
+  }
+
+  return body;
 }
 
 export default function GpuRentingFrontend() {
+  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8000");
+  const [adminToken, setAdminToken] = useState("change-me");
   const [tenantName, setTenantName] = useState("Cliente Demo");
-  const [subdomain, setSubdomain] = useState("cliente-demo");
   const [service, setService] = useState("inference");
-  const [modelId, setModelId] = useState("gpt-oss-20b-gguf");
-  const [vram, setVram] = useState([20]);
-  const [region, setRegion] = useState("eu-west");
-  const [scaling, setScaling] = useState("reserved");
-  const [dedicatedWindow, setDedicatedWindow] = useState(true);
-  const [privateNetwork, setPrivateNetwork] = useState(false);
-  const [apiKeyAuth, setApiKeyAuth] = useState(true);
-  const [generated, setGenerated] = useState(false);
+  const [model, setModel] = useState("mistral-7b-instruct");
+  const [vram, setVram] = useState([12]);
 
-  const selectedModel = useMemo(() => models.find((m) => m.id === modelId) ?? models[0], [modelId]);
+  const [apiKey, setApiKey] = useState("");
+  const [tenantId, setTenantId] = useState("");
+  const [requestJson, setRequestJson] = useState('{"messages":[{"role":"user","content":"Resume este documento"}],"temperature":0.2}');
+
+  const [deployLoading, setDeployLoading] = useState(false);
+  const [invokeLoading, setInvokeLoading] = useState(false);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+  const [lastResponse, setLastResponse] = useState(null);
+  const [analytics, setAnalytics] = useState(null);
+  const [error, setError] = useState("");
 
   const compatibleModels = useMemo(
-    () => models.filter((m) => m.services.includes(service)),
+    () => modelCatalog.filter((m) => m.services.includes(service)),
     [service]
   );
 
-  const normalizedSubdomain = useMemo(() => makeSlug(subdomain || tenantName), [subdomain, tenantName]);
-
-  const endpointBase = useMemo(() => {
-    const domain = privateNetwork
-      ? `https://${normalizedSubdomain}.priv.gpu-service.local`
-      : `https://${normalizedSubdomain}.gpu-service.example.com`;
-    return `${domain}${serviceInfo[service].endpoint}`;
-  }, [normalizedSubdomain, privateNetwork, service]);
-
-  const monthlyPrice = useMemo(
-    () => estimateMonthlyPrice({ vram: vram[0], service, dedicated: dedicatedWindow }),
-    [vram, service, dedicatedWindow]
+  const selectedModel = useMemo(
+    () => compatibleModels.find((m) => m.id === model) || compatibleModels[0],
+    [compatibleModels, model]
   );
 
-  const setupPrice = useMemo(
-    () => estimateSetupPrice({ service, auth: apiKeyAuth, privateNetwork }),
-    [service, apiKeyAuth, privateNetwork]
-  );
+  const backendEndpoint = useMemo(() => `${baseUrl}${serviceMeta[service].endpoint}`, [baseUrl, service]);
 
-  const serviceMeta = serviceInfo[service];
-  const ServiceIcon = serviceMeta.icon;
+  const canDeploy = vram[0] >= (selectedModel?.minVram || 0);
 
-  const canDeploy = vram[0] >= selectedModel.minVram;
+  const provisionTenant = async () => {
+    setError("");
+    setDeployLoading(true);
+    try {
+      const tenant = await api(`${baseUrl}/v1/admin/tenants`, {
+        method: "POST",
+        headers: { "X-Admin-Token": adminToken },
+        body: JSON.stringify({ name: tenantName || slugify(tenantName) }),
+      });
 
-  const sampleCurl = useMemo(() => {
-    if (service === "inference") {
-      return `curl -X POST '${endpointBase}' \\
-  -H 'Authorization: Bearer sk_live_xxx' \\
-  -H 'Content-Type: application/json' \\
-  -d '{
-    "model": "${selectedModel.id}",
-    "messages": [{"role": "user", "content": "Hola, resume este documento"}],
-    "temperature": 0.2
-  }'`;
+      const reservation = {
+        tenant_id: tenant.tenant_id,
+        reserved_vram_mb: vram[0] * 1024,
+        max_concurrency: 4,
+        priority: 80,
+        allowed_services: ["inference", "embeddings"],
+        preemptive: true,
+        enabled: true,
+      };
+
+      await api(`${baseUrl}/v1/admin/reservations`, {
+        method: "POST",
+        headers: { "X-Admin-Token": adminToken },
+        body: JSON.stringify(reservation),
+      });
+
+      setApiKey(tenant.api_key);
+      setTenantId(tenant.tenant_id);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDeployLoading(false);
     }
-
-    if (service === "embeddings") {
-      return `curl -X POST '${endpointBase}' \\
-  -H 'Authorization: Bearer sk_live_xxx' \\
-  -H 'Content-Type: application/json' \\
-  -d '{
-    "model": "${selectedModel.id}",
-    "input": ["texto para vectorizar"]
-  }'`;
-    }
-
-    return `curl -X POST '${endpointBase}' \\
-  -H 'Authorization: Bearer sk_live_xxx' \\
-  -H 'Content-Type: application/json' \\
-  -d '{
-    "model": "${selectedModel.id}",
-    "query": "¿Qué SLA tiene el servicio?",
-    "top_k": 5,
-    "namespace": "cliente-demo"
-  }'`;
-  }, [endpointBase, selectedModel.id, service]);
-
-  const handleServiceChange = (nextService) => {
-    setService(nextService);
-    const firstCompatible = models.find((m) => m.services.includes(nextService));
-    if (firstCompatible) {
-      setModelId(firstCompatible.id);
-      setVram([Math.max(vram[0], firstCompatible.recommendedVram)]);
-    }
-    setGenerated(false);
   };
 
-  const handleModelChange = (nextModelId) => {
-    setModelId(nextModelId);
-    const m = models.find((item) => item.id === nextModelId);
-    if (m) {
-      setVram([Math.max(vram[0], m.minVram)]);
+  const invokeService = async () => {
+    setError("");
+    setInvokeLoading(true);
+    try {
+      const payload = JSON.parse(requestJson);
+      const body = await api(`${baseUrl}${serviceMeta[service].endpoint}`, {
+        method: "POST",
+        headers: { "X-API-Key": apiKey },
+        body: JSON.stringify({
+          model: selectedModel.id,
+          requested_vram_mb: vram[0] * 1024,
+          priority: 50,
+          payload,
+        }),
+      });
+      setLastResponse(body);
+      await loadAnalytics();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setInvokeLoading(false);
     }
-    setGenerated(false);
   };
 
-  const deploy = () => {
-    setGenerated(true);
+  const loadAnalytics = async () => {
+    if (!apiKey) return;
+    setAnalyticsLoading(true);
+    try {
+      const body = await api(`${baseUrl}/v1/analytics/summary`, {
+        headers: { "X-API-Key": apiKey },
+      });
+      setAnalytics(body);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setAnalyticsLoading(false);
+    }
   };
 
-  const copyText = async (text) => {
+  const successRate = useMemo(() => {
+    if (!analytics || analytics.requests_total === 0) return 0;
+    return Math.round((analytics.success_total / analytics.requests_total) * 100);
+  }, [analytics]);
+
+  const copy = async (text) => {
     try {
       await navigator.clipboard.writeText(text);
     } catch {
-      // noop for preview environments
+      // ignore
     }
   };
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-7xl px-4 py-8 md:px-8 lg:px-10">
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mb-8 grid gap-4 lg:grid-cols-[1.4fr_0.9fr]"
-        >
-          <Card className="rounded-3xl border-0 shadow-lg">
-            <CardHeader className="pb-4">
-              <div className="mb-4 flex items-center gap-2">
-                <Badge className="rounded-full">GPU Renting</Badge>
-                <Badge variant="secondary" className="rounded-full">L40S Managed Service</Badge>
-              </div>
-              <CardTitle className="text-3xl font-semibold tracking-tight">
-                Portal de contratación y despliegue de servicios GPU
-              </CardTitle>
-              <CardDescription className="max-w-2xl text-base leading-7">
-                Configura VRAM reservada, elige modelo, selecciona el tipo de servicio y genera un endpoint de inferencia listo para integrarse con tu aplicación.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="rounded-2xl bg-slate-100 p-4">
-                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-700">
-                    <ShieldCheck className="h-4 w-4" />
-                    Servicio gestionado
-                  </div>
-                  <p className="text-sm text-slate-600">Sin acceso a sistema operativo ni GPU directa. Consumo mediante API segura.</p>
-                </div>
-                <div className="rounded-2xl bg-slate-100 p-4">
-                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-700">
-                    <Gauge className="h-4 w-4" />
-                    Capacidad reservada
-                  </div>
-                  <p className="text-sm text-slate-600">Reserva de VRAM, control de concurrencia y priorización por tenant.</p>
-                </div>
-                <div className="rounded-2xl bg-slate-100 p-4">
-                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-700">
-                    <Rocket className="h-4 w-4" />
-                    Endpoint dedicado
-                  </div>
-                  <p className="text-sm text-slate-600">Provisionado de endpoint HTTPS con autenticación y catálogo controlado de modelos.</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
+      <div className="mx-auto max-w-7xl px-4 py-8 md:px-8">
+        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="mb-8">
           <Card className="rounded-3xl border-0 shadow-lg">
             <CardHeader>
-              <CardTitle className="text-xl">Resumen comercial</CardTitle>
-              <CardDescription>Estimación orientativa para propuesta y preventa.</CardDescription>
+              <div className="mb-2 flex items-center gap-2">
+                <Badge className="rounded-full">GPU Renting</Badge>
+                <Badge variant="secondary" className="rounded-full">llama.cpp Managed</Badge>
+              </div>
+              <CardTitle className="text-3xl">Portal conectado al backend</CardTitle>
+              <CardDescription>
+                Provisiona tenant + reserva, ejecuta inferencia/embeddings y visualiza analytics de tokens, latencia y estados en tiempo real.
+              </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-5">
-              <div className="rounded-2xl bg-slate-100 p-4">
-                <div className="text-sm text-slate-500">Cuota mensual estimada</div>
-                <div className="mt-1 text-3xl font-semibold">{monthlyPrice.toLocaleString("es-ES")} €</div>
-                <div className="mt-1 text-sm text-slate-600">Incluye capacidad reservada, operación y endpoint gestionado.</div>
-              </div>
-              <div className="rounded-2xl bg-slate-100 p-4">
-                <div className="text-sm text-slate-500">Puesta en marcha estimada</div>
-                <div className="mt-1 text-2xl font-semibold">{setupPrice.toLocaleString("es-ES")} €</div>
-                <div className="mt-1 text-sm text-slate-600">Configuración inicial, despliegue y validación técnica.</div>
-              </div>
-              <div className="grid gap-3 text-sm text-slate-600">
-                <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                  <span>VRAM reservada</span>
-                  <span className="font-medium text-slate-900">{vram[0]} GB</span>
-                </div>
-                <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                  <span>Servicio</span>
-                  <span className="font-medium text-slate-900">{serviceMeta.label}</span>
-                </div>
-                <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                  <span>Modelo</span>
-                  <span className="font-medium text-slate-900">{selectedModel.name}</span>
-                </div>
-              </div>
-            </CardContent>
           </Card>
         </motion.div>
 
-        <div className="grid gap-6 xl:grid-cols-[1.3fr_0.9fr]">
+        <div className="grid gap-6 xl:grid-cols-[1.35fr_1fr]">
           <Card className="rounded-3xl border-0 shadow-lg">
             <CardHeader>
-              <CardTitle>Configurar servicio GPU</CardTitle>
-              <CardDescription>Define el tenant, la capacidad y el endpoint que se va a provisionar.</CardDescription>
+              <CardTitle>Configuración y conexión</CardTitle>
+              <CardDescription>Backend FastAPI + endpoints de servicio y analytics.</CardDescription>
             </CardHeader>
-            <CardContent>
-              <Tabs defaultValue="service" className="w-full">
-                <TabsList className="mb-6 grid w-full grid-cols-3 rounded-2xl">
-                  <TabsTrigger value="service">Servicio</TabsTrigger>
-                  <TabsTrigger value="capacity">Capacidad</TabsTrigger>
-                  <TabsTrigger value="network">Red y seguridad</TabsTrigger>
+            <CardContent className="space-y-6">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Base URL backend</Label>
+                  <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className="rounded-2xl" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Admin token</Label>
+                  <Input value={adminToken} onChange={(e) => setAdminToken(e.target.value)} className="rounded-2xl" />
+                </div>
+              </div>
+
+              <Tabs value={service} onValueChange={(next) => {
+                setService(next);
+                const first = modelCatalog.find((m) => m.services.includes(next));
+                if (first) {
+                  setModel(first.id);
+                  setVram([Math.max(vram[0], first.minVram)]);
+                }
+              }}>
+                <TabsList className="grid w-full grid-cols-2 rounded-2xl">
+                  <TabsTrigger value="inference">Inferencia</TabsTrigger>
+                  <TabsTrigger value="embeddings">Embeddings</TabsTrigger>
                 </TabsList>
-
-                <TabsContent value="service" className="space-y-6">
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label>Nombre del cliente / tenant</Label>
-                      <Input
-                        value={tenantName}
-                        onChange={(e) => {
-                          setTenantName(e.target.value);
-                          if (!subdomain || subdomain === makeSlug(tenantName)) {
-                            setSubdomain(makeSlug(e.target.value));
-                          }
-                          setGenerated(false);
-                        }}
-                        placeholder="Ej. Cliente Demo"
-                        className="rounded-2xl"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Subdominio / namespace</Label>
-                      <Input
-                        value={subdomain}
-                        onChange={(e) => {
-                          setSubdomain(e.target.value);
-                          setGenerated(false);
-                        }}
-                        placeholder="cliente-demo"
-                        className="rounded-2xl"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label>Tipo de servicio</Label>
-                      <Select value={service} onValueChange={handleServiceChange}>
-                        <SelectTrigger className="rounded-2xl">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="inference">Inferencia</SelectItem>
-                          <SelectItem value="embeddings">Embeddings</SelectItem>
-                          <SelectItem value="rag">RAG</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Modelo</Label>
-                      <Select value={modelId} onValueChange={handleModelChange}>
-                        <SelectTrigger className="rounded-2xl">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {compatibleModels.map((model) => (
-                            <SelectItem key={model.id} value={model.id}>
-                              {model.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border bg-slate-50 p-5">
-                    <div className="mb-3 flex items-center justify-between">
-                      <div>
-                        <div className="font-medium text-slate-900">Ficha del modelo</div>
-                        <div className="text-sm text-slate-600">{selectedModel.description}</div>
-                      </div>
-                      <Badge variant="secondary" className="rounded-full">{selectedModel.type}</Badge>
-                    </div>
-                    <div className="grid gap-3 md:grid-cols-3">
-                      <div className="rounded-xl bg-white p-3 text-sm">
-                        <div className="text-slate-500">VRAM mínima</div>
-                        <div className="mt-1 font-semibold text-slate-900">{selectedModel.minVram} GB</div>
-                      </div>
-                      <div className="rounded-xl bg-white p-3 text-sm">
-                        <div className="text-slate-500">VRAM recomendada</div>
-                        <div className="mt-1 font-semibold text-slate-900">{selectedModel.recommendedVram} GB</div>
-                      </div>
-                      <div className="rounded-xl bg-white p-3 text-sm">
-                        <div className="text-slate-500">Endpoint</div>
-                        <div className="mt-1 font-semibold text-slate-900">{serviceMeta.endpoint}</div>
-                      </div>
-                    </div>
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="capacity" className="space-y-6">
-                  <div className="rounded-2xl border bg-slate-50 p-5">
-                    <div className="mb-4 flex items-center justify-between">
-                      <div>
-                        <div className="font-medium text-slate-900">VRAM reservada</div>
-                        <div className="text-sm text-slate-600">Elige la capacidad garantizada para el servicio del cliente.</div>
-                      </div>
-                      <div className="text-3xl font-semibold">{vram[0]} GB</div>
-                    </div>
-                    <Slider
-                      value={vram}
-                      onValueChange={(value) => {
-                        setVram(value);
-                        setGenerated(false);
-                      }}
-                      min={4}
-                      max={24}
-                      step={1}
-                    />
-                    <div className="mt-3 flex justify-between text-xs text-slate-500">
-                      <span>4 GB</span>
-                      <span>12 GB</span>
-                      <span>20 GB</span>
-                      <span>24 GB</span>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label>Región</Label>
-                      <Select value={region} onValueChange={(value) => { setRegion(value); setGenerated(false); }}>
-                        <SelectTrigger className="rounded-2xl">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="eu-west">EU West</SelectItem>
-                          <SelectItem value="eu-south">EU South</SelectItem>
-                          <SelectItem value="on-prem">On-premise</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Modo de capacidad</Label>
-                      <Select value={scaling} onValueChange={(value) => { setScaling(value); setGenerated(false); }}>
-                        <SelectTrigger className="rounded-2xl">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="reserved">Reserva garantizada</SelectItem>
-                          <SelectItem value="burst">Reserva + burst</SelectItem>
-                          <SelectItem value="shared">Compartido gestionado</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="flex items-center justify-between rounded-2xl border bg-white px-4 py-4">
-                      <div>
-                        <div className="font-medium">Ventana dedicada</div>
-                        <div className="text-sm text-slate-600">Prioridad de servicio sobre backend reclaimable.</div>
-                      </div>
-                      <Switch checked={dedicatedWindow} onCheckedChange={(checked) => { setDedicatedWindow(checked); setGenerated(false); }} />
-                    </div>
-                    <div className="flex items-center justify-between rounded-2xl border bg-white px-4 py-4">
-                      <div>
-                        <div className="font-medium">Autenticación API Key</div>
-                        <div className="text-sm text-slate-600">Protección del endpoint con credenciales de cliente.</div>
-                      </div>
-                      <Switch checked={apiKeyAuth} onCheckedChange={(checked) => { setApiKeyAuth(checked); setGenerated(false); }} />
-                    </div>
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="network" className="space-y-6">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="flex items-center justify-between rounded-2xl border bg-white px-4 py-4">
-                      <div>
-                        <div className="font-medium">Red privada</div>
-                        <div className="text-sm text-slate-600">Usa un dominio privado interno para entornos corporativos.</div>
-                      </div>
-                      <Switch checked={privateNetwork} onCheckedChange={(checked) => { setPrivateNetwork(checked); setGenerated(false); }} />
-                    </div>
-                    <div className="rounded-2xl border bg-white p-4">
-                      <div className="mb-2 flex items-center gap-2 font-medium">
-                        <Globe className="h-4 w-4" />
-                        Endpoint base
-                      </div>
-                      <p className="break-all text-sm text-slate-600">{endpointBase}</p>
-                    </div>
-                  </div>
-
-                  <Alert className="rounded-2xl">
-                    <KeyRound className="h-4 w-4" />
-                    <AlertTitle>Provisionado seguro</AlertTitle>
-                    <AlertDescription>
-                      El frontend genera la configuración comercial y técnica del endpoint. El backend será quien cree la API key, namespace, límites y política de capacidad.
-                    </AlertDescription>
-                  </Alert>
-                </TabsContent>
+                <TabsContent value="inference" className="mt-4" />
+                <TabsContent value="embeddings" className="mt-4" />
               </Tabs>
 
-              <Separator className="my-6" />
-
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="text-sm text-slate-600">
-                  {canDeploy ? (
-                    <span className="inline-flex items-center gap-2 text-emerald-700">
-                      <CheckCircle2 className="h-4 w-4" />
-                      La configuración es válida para el modelo seleccionado.
-                    </span>
-                  ) : (
-                    <span className="text-rose-700">
-                      Aumenta la VRAM al menos hasta {selectedModel.minVram} GB para desplegar este modelo.
-                    </span>
-                  )}
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Tenant</Label>
+                  <Input value={tenantName} onChange={(e) => setTenantName(e.target.value)} className="rounded-2xl" />
                 </div>
-                <Button className="rounded-2xl px-6" size="lg" disabled={!canDeploy} onClick={deploy}>
-                  <Zap className="mr-2 h-4 w-4" />
-                  Generar endpoint
+                <div className="space-y-2">
+                  <Label>Modelo</Label>
+                  <Select value={model} onValueChange={setModel}>
+                    <SelectTrigger className="rounded-2xl"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {compatibleModels.map((m) => <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border bg-slate-50 p-5">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <p className="font-medium">VRAM reservada</p>
+                    <p className="text-sm text-slate-600">Controla capacidad a reservar para el tenant.</p>
+                  </div>
+                  <Badge variant="secondary">{vram[0]} GB</Badge>
+                </div>
+                <Slider min={4} max={48} step={1} value={vram} onValueChange={setVram} />
+              </div>
+
+              <div className="space-y-2">
+                <Label>Payload JSON para llama.cpp server</Label>
+                <textarea
+                  value={requestJson}
+                  onChange={(e) => setRequestJson(e.target.value)}
+                  rows={7}
+                  className="w-full rounded-2xl border bg-white p-3 font-mono text-xs"
+                />
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <Button className="rounded-2xl" disabled={!canDeploy || deployLoading} onClick={provisionTenant}>
+                  <Rocket className="mr-2 h-4 w-4" />
+                  {deployLoading ? "Provisionando..." : "Crear tenant + reserva"}
+                </Button>
+                <Button variant="secondary" className="rounded-2xl" disabled={!apiKey || invokeLoading} onClick={invokeService}>
+                  <Terminal className="mr-2 h-4 w-4" />
+                  {invokeLoading ? "Invocando..." : `Probar ${serviceMeta[service].label}`}
+                </Button>
+                <Button variant="outline" className="rounded-2xl" disabled={!apiKey || analyticsLoading} onClick={loadAnalytics}>
+                  <Activity className="mr-2 h-4 w-4" />
+                  Actualizar analytics
                 </Button>
               </div>
+
+              {!canDeploy && (
+                <Alert>
+                  <AlertTitle>VRAM insuficiente</AlertTitle>
+                  <AlertDescription>El modelo requiere al menos {selectedModel.minVram} GB.</AlertDescription>
+                </Alert>
+              )}
+
+              {error && (
+                <Alert className="border-rose-300 bg-rose-50 text-rose-900">
+                  <AlertTitle>Error</AlertTitle>
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
             </CardContent>
           </Card>
 
           <div className="space-y-6">
             <Card className="rounded-3xl border-0 shadow-lg">
               <CardHeader>
-                <CardTitle>Servicio resultante</CardTitle>
-                <CardDescription>Resumen técnico del despliegue que se ofrecería al cliente.</CardDescription>
+                <CardTitle>Conexión activa</CardTitle>
+                <CardDescription>Credenciales y endpoint conectados al backend real.</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-center gap-3 rounded-2xl bg-slate-100 p-4">
-                  <div className="rounded-2xl bg-white p-3 shadow-sm">
-                    <ServiceIcon className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <div className="font-medium text-slate-900">{serviceMeta.label}</div>
-                    <div className="text-sm text-slate-600">{serviceMeta.color}</div>
-                  </div>
+              <CardContent className="space-y-3 text-sm">
+                <div className="rounded-xl border bg-white p-3">
+                  <p className="text-slate-500">Tenant ID</p>
+                  <p className="break-all font-medium">{tenantId || "-"}</p>
                 </div>
-
-                <div className="grid gap-3 text-sm">
-                  <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                    <span className="text-slate-500">Tenant</span>
-                    <span className="font-medium">{tenantName || "-"}</span>
+                <div className="rounded-xl border bg-white p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-slate-500">API Key</p>
+                    <Button size="sm" variant="outline" onClick={() => copy(apiKey)} className="rounded-xl" disabled={!apiKey}>
+                      <Copy className="mr-2 h-3 w-3" /> Copiar
+                    </Button>
                   </div>
-                  <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                    <span className="text-slate-500">Modelo</span>
-                    <span className="font-medium">{selectedModel.name}</span>
-                  </div>
-                  <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                    <span className="text-slate-500">VRAM</span>
-                    <span className="font-medium">{vram[0]} GB</span>
-                  </div>
-                  <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                    <span className="text-slate-500">Región</span>
-                    <span className="font-medium">{region}</span>
-                  </div>
-                  <div className="flex items-center justify-between rounded-xl border bg-white px-3 py-2">
-                    <span className="text-slate-500">Capacidad</span>
-                    <span className="font-medium">{scaling}</span>
-                  </div>
+                  <p className="break-all font-mono text-xs">{apiKey || "-"}</p>
+                </div>
+                <div className="rounded-xl border bg-white p-3">
+                  <p className="text-slate-500">Endpoint</p>
+                  <p className="break-all font-medium">{backendEndpoint}</p>
                 </div>
               </CardContent>
             </Card>
 
             <Card className="rounded-3xl border-0 shadow-lg">
               <CardHeader>
-                <CardTitle>Endpoint generado</CardTitle>
-                <CardDescription>Vista previa del endpoint comercial y técnico que se provisionará.</CardDescription>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Analytics</CardTitle>
+                    <CardDescription>Tokens, llamadas, estados y latencia.</CardDescription>
+                  </div>
+                  <BarChart3 className="h-5 w-5 text-slate-500" />
+                </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="rounded-2xl border bg-slate-50 p-4">
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 font-medium text-slate-900">
-                      <ServerCog className="h-4 w-4" />
-                      Endpoint HTTPS
-                    </div>
-                    <Button variant="outline" size="sm" className="rounded-xl" onClick={() => copyText(endpointBase)}>
-                      <Copy className="mr-2 h-4 w-4" />
-                      Copiar
-                    </Button>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-2xl bg-slate-100 p-3">
+                    <p className="text-xs text-slate-500">Llamadas</p>
+                    <p className="text-2xl font-semibold">{analytics?.requests_total ?? 0}</p>
                   </div>
-                  <div className="break-all text-sm text-slate-700">{endpointBase}</div>
+                  <div className="rounded-2xl bg-slate-100 p-3">
+                    <p className="text-xs text-slate-500">Tokens totales</p>
+                    <p className="text-2xl font-semibold">{analytics?.total_tokens_total ?? 0}</p>
+                  </div>
+                  <div className="rounded-2xl bg-slate-100 p-3">
+                    <p className="text-xs text-slate-500">Latencia media</p>
+                    <p className="text-2xl font-semibold">{Math.round(analytics?.avg_latency_ms ?? 0)} ms</p>
+                  </div>
+                  <div className="rounded-2xl bg-slate-100 p-3">
+                    <p className="text-xs text-slate-500">Éxito</p>
+                    <p className="text-2xl font-semibold">{successRate}%</p>
+                  </div>
                 </div>
 
-                <div className="rounded-2xl border bg-slate-50 p-4">
-                  <div className="mb-2 flex items-center gap-2 font-medium text-slate-900">
-                    <Cpu className="h-4 w-4" />
-                    Ejemplo de consumo
+                <div className="space-y-2 rounded-2xl border bg-white p-4">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="inline-flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald-600" />Correctas</span>
+                    <span>{analytics?.success_total ?? 0}</span>
                   </div>
-                  <pre className="overflow-x-auto whitespace-pre-wrap rounded-xl bg-slate-900 p-4 text-xs leading-6 text-slate-100">
-                    {sampleCurl}
-                  </pre>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                    <div className="h-full bg-emerald-500" style={{ width: `${successRate}%` }} />
+                  </div>
+                  <div className="flex items-center justify-between text-sm text-slate-600">
+                    <span className="inline-flex items-center gap-2"><Clock3 className="h-4 w-4" />Con error</span>
+                    <span>{analytics?.failed_total ?? 0}</span>
+                  </div>
                 </div>
 
-                {generated ? (
-                  <motion.div
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"
-                  >
-                    <div className="flex items-start gap-3">
-                      <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-700" />
-                      <div>
-                        <div className="font-medium text-emerald-900">Configuración lista para provisionado</div>
-                        <p className="mt-1 text-sm text-emerald-800">
-                          El tenant <strong>{tenantName}</strong> quedaría aprovisionado con <strong>{vram[0]} GB</strong> para <strong>{serviceMeta.label.toLowerCase()}</strong> usando <strong>{selectedModel.name}</strong>.
-                        </p>
+                <div className="rounded-2xl border bg-white p-4">
+                  <p className="mb-2 text-sm font-medium">Desglose por servicio</p>
+                  <div className="space-y-2 text-sm">
+                    {(analytics?.by_service || []).map((row) => (
+                      <div key={row.service_type} className="rounded-xl bg-slate-50 p-3">
+                        <div className="mb-1 flex items-center justify-between">
+                          <span className="font-medium capitalize">{row.service_type}</span>
+                          <Badge variant="secondary">{row.requests} req</Badge>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1 text-xs text-slate-600">
+                          <span>Input: {row.request_tokens}</span>
+                          <span>Output: {row.response_tokens}</span>
+                          <span>Total: {row.total_tokens}</span>
+                          <span><Timer className="mr-1 inline h-3 w-3" />{Math.round(row.avg_latency_ms)} ms</span>
+                        </div>
                       </div>
-                    </div>
-                  </motion.div>
-                ) : (
-                  <div className="rounded-2xl border border-dashed p-4 text-sm text-slate-600">
-                    Ajusta la configuración y pulsa <strong>Generar endpoint</strong> para ver la propuesta final del servicio.
+                    ))}
+                    {!analytics?.by_service?.length && <p className="text-slate-500">Sin datos aún.</p>}
                   </div>
-                )}
+                </div>
               </CardContent>
             </Card>
           </div>
+        </div>
+
+        {lastResponse && (
+          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="mt-6">
+            <Card className="rounded-3xl border-0 shadow-lg">
+              <CardHeader>
+                <CardTitle>Última respuesta del backend</CardTitle>
+                <CardDescription>Respuesta real del endpoint gestionado por llama.cpp / fallback backend.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <pre className="overflow-x-auto rounded-2xl bg-slate-900 p-4 text-xs text-slate-100">
+                  {JSON.stringify(lastResponse, null, 2)}
+                </pre>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+
+        <div className="mt-6 rounded-2xl border border-dashed bg-white p-4 text-sm text-slate-600">
+          <p className="inline-flex items-center gap-2 font-medium"><KeyRound className="h-4 w-4" />Flujo recomendado</p>
+          <ol className="mt-2 list-decimal space-y-1 pl-5">
+            <li>Configurar backend URL y token admin.</li>
+            <li>Crear tenant + reserva (genera API key).</li>
+            <li>Probar inferencia/embeddings con payload JSON.</li>
+            <li>Abrir analytics y validar tokens, llamadas y estados.</li>
+          </ol>
         </div>
       </div>
     </div>
