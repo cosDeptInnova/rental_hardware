@@ -13,6 +13,7 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     host: str = os.getenv("HOST", "127.0.0.1")
     port: int = int(os.getenv("PORT", "8000"))
+    llama_server_url: str = os.getenv("LLAMA_SERVER_URL", "")
 
 
 settings = Settings()

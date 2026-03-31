@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_tenant
 from app.core.db import get_db
-from app.core.models import Job, Reservation, Tenant
-from app.core.schemas import JobCreate, JobRead, ReservationCreate, ServiceType
+from app.core.models import Job, RequestMetric, Reservation, Tenant
+from app.core.schemas import (
+    AnalyticsServiceBreakdown,
+    AnalyticsSummaryRead,
+    EmbeddingsRequest,
+    InferenceRequest,
+    JobCreate,
+    JobRead,
+    ReservationCreate,
+    ServiceResponse,
+    ServiceType,
+)
 from app.gpu.nvml_monitor import NvmlMonitor
 from app.scheduler.admission import AdmissionController
+from app.services.llama_gateway import LlamaGateway
 from app.supervisor.process_manager import ProcessManager
 
 
@@ -36,14 +47,13 @@ def reservation_model_to_schema(reservation: Reservation) -> ReservationCreate:
     )
 
 
-@router.post("/jobs", response_model=JobRead)
-def submit_job(
+def _create_job(
     payload: JobCreate,
-    tenant: Tenant = Depends(get_current_tenant),
-    db: Session = Depends(get_db),
-    process_manager: ProcessManager = Depends(get_process_manager),
-    admission: AdmissionController = Depends(get_admission_controller),
-) -> JobRead:
+    tenant: Tenant,
+    db: Session,
+    process_manager: ProcessManager,
+    admission: AdmissionController,
+) -> Job:
     reservation = db.execute(
         select(Reservation).where(Reservation.tenant_id == tenant.id)
     ).scalar_one_or_none()
@@ -80,13 +90,31 @@ def submit_job(
         service_type=payload.service_type.value,
         requested_vram_mb=payload.requested_vram_mb,
         priority=payload.priority,
-        payload_json=payload.payload,
+        payload_json={**payload.payload, "_model": payload.model},
         state="queued",
         error=None,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
+    return job
+
+
+@router.post("/jobs", response_model=JobRead)
+def submit_job(
+    payload: JobCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db),
+    process_manager: ProcessManager = Depends(get_process_manager),
+    admission: AdmissionController = Depends(get_admission_controller),
+) -> JobRead:
+    job = _create_job(
+        payload=payload,
+        tenant=tenant,
+        db=db,
+        process_manager=process_manager,
+        admission=admission,
+    )
 
     return JobRead(
         id=job.id,
@@ -98,6 +126,112 @@ def submit_job(
         state=job.state,
         worker_id=job.worker_id,
         error=job.error,
+    )
+
+
+def _execute_service(
+    service_type: ServiceType,
+    model_name: str,
+    requested_vram_mb: int,
+    priority: int,
+    payload: dict,
+    endpoint: str,
+    tenant: Tenant,
+    db: Session,
+    process_manager: ProcessManager,
+    admission: AdmissionController,
+) -> ServiceResponse:
+    created_job = _create_job(
+        payload=JobCreate(
+            service_type=service_type,
+            requested_vram_mb=requested_vram_mb,
+            priority=priority,
+            payload=payload,
+            model=model_name,
+        ),
+        tenant=tenant,
+        db=db,
+        process_manager=process_manager,
+        admission=admission,
+    )
+
+    created_job.state = "running"
+    db.commit()
+    db.refresh(created_job)
+
+    result = LlamaGateway().invoke(service_type=service_type, model_name=model_name, payload=payload)
+    created_job.state = "finished" if result.ok else "failed"
+    created_job.error = result.error
+    db.add(
+        RequestMetric(
+            tenant_id=tenant.id,
+            job_id=created_job.id,
+            service_type=service_type.value,
+            endpoint=endpoint,
+            model_name=model_name,
+            status_code=result.status_code,
+            state=created_job.state,
+            request_tokens=result.request_tokens,
+            response_tokens=result.response_tokens,
+            total_tokens=result.request_tokens + result.response_tokens,
+            latency_ms=result.latency_ms,
+            error=result.error,
+        )
+    )
+    db.commit()
+
+    return ServiceResponse(
+        request_id=created_job.external_id,
+        job_id=created_job.id,
+        state=created_job.state,
+        status_code=result.status_code,
+        service_type=service_type,
+        model=model_name,
+        result=result.output,
+    )
+
+
+@router.post("/inference", response_model=ServiceResponse)
+def run_inference(
+    payload: InferenceRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db),
+    process_manager: ProcessManager = Depends(get_process_manager),
+    admission: AdmissionController = Depends(get_admission_controller),
+) -> ServiceResponse:
+    return _execute_service(
+        service_type=ServiceType.INFERENCE,
+        model_name=payload.model,
+        requested_vram_mb=payload.requested_vram_mb,
+        priority=payload.priority,
+        payload=payload.payload,
+        endpoint="/v1/inference",
+        tenant=tenant,
+        db=db,
+        process_manager=process_manager,
+        admission=admission,
+    )
+
+
+@router.post("/embeddings", response_model=ServiceResponse)
+def run_embeddings(
+    payload: EmbeddingsRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db),
+    process_manager: ProcessManager = Depends(get_process_manager),
+    admission: AdmissionController = Depends(get_admission_controller),
+) -> ServiceResponse:
+    return _execute_service(
+        service_type=ServiceType.EMBEDDINGS,
+        model_name=payload.model,
+        requested_vram_mb=payload.requested_vram_mb,
+        priority=payload.priority,
+        payload=payload.payload,
+        endpoint="/v1/embeddings",
+        tenant=tenant,
+        db=db,
+        process_manager=process_manager,
+        admission=admission,
     )
 
 
@@ -124,4 +258,71 @@ def get_job(
         state=job.state,
         worker_id=job.worker_id,
         error=job.error,
+    )
+
+
+@router.get("/analytics/summary", response_model=AnalyticsSummaryRead)
+def analytics_summary(
+    tenant: Tenant = Depends(get_current_tenant),
+    db: Session = Depends(get_db),
+) -> AnalyticsSummaryRead:
+    totals = db.execute(
+        select(
+            func.count(RequestMetric.id),
+            func.sum(case((RequestMetric.status_code < 400, 1), else_=0)),
+            func.sum(case((RequestMetric.status_code >= 400, 1), else_=0)),
+            func.sum(RequestMetric.request_tokens),
+            func.sum(RequestMetric.response_tokens),
+            func.sum(RequestMetric.total_tokens),
+            func.avg(RequestMetric.latency_ms),
+        ).where(RequestMetric.tenant_id == tenant.id)
+    ).one()
+
+    job_totals = db.execute(
+        select(
+            func.sum(case((Job.state == "queued", 1), else_=0)),
+            func.sum(case((Job.state == "running", 1), else_=0)),
+            func.sum(case((Job.state == "finished", 1), else_=0)),
+            func.sum(case((Job.state == "failed", 1), else_=0)),
+        ).where(Job.tenant_id == tenant.id)
+    ).one()
+
+    by_service_rows = db.execute(
+        select(
+            RequestMetric.service_type,
+            func.count(RequestMetric.id),
+            func.sum(RequestMetric.request_tokens),
+            func.sum(RequestMetric.response_tokens),
+            func.sum(RequestMetric.total_tokens),
+            func.avg(RequestMetric.latency_ms),
+        )
+        .where(RequestMetric.tenant_id == tenant.id)
+        .group_by(RequestMetric.service_type)
+    ).all()
+
+    by_service = [
+        AnalyticsServiceBreakdown(
+            service_type=ServiceType(row[0]),
+            requests=int(row[1] or 0),
+            request_tokens=int(row[2] or 0),
+            response_tokens=int(row[3] or 0),
+            total_tokens=int(row[4] or 0),
+            avg_latency_ms=float(row[5] or 0),
+        )
+        for row in by_service_rows
+    ]
+
+    return AnalyticsSummaryRead(
+        requests_total=int(totals[0] or 0),
+        success_total=int(totals[1] or 0),
+        failed_total=int(totals[2] or 0),
+        queued_total=int(job_totals[0] or 0),
+        running_total=int(job_totals[1] or 0),
+        finished_total=int(job_totals[2] or 0),
+        failed_jobs_total=int(job_totals[3] or 0),
+        request_tokens_total=int(totals[3] or 0),
+        response_tokens_total=int(totals[4] or 0),
+        total_tokens_total=int(totals[5] or 0),
+        avg_latency_ms=float(totals[6] or 0),
+        by_service=by_service,
     )
