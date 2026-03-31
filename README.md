@@ -24,11 +24,51 @@ Broker multi-tenant para alquilar capacidad GPU como servicio gestionado por API
 Definir `LLAMA_SERVER_URL` para enrutar peticiones al `llama.cpp server`.
 Si no está configurado, el sistema responde con un fallback simulado útil para pruebas de integración y de paneles analytics.
 
-## Arranque local
+## Arquitectura de despliegue (Nginx como único punto de entrada)
+
+Esta configuración deja el sistema listo para el requisito:
+
+- **El frontend/cliente solo ve Nginx** (puerto 80 publicado).
+- **El backend FastAPI solo es accesible por Nginx** (sin `ports`, únicamente `expose` y red interna).
+
+Se incluye:
+
+- `Dockerfile` para `api`.
+- `docker-compose.yml` con red `backend` marcada como `internal: true`.
+- `nginx.conf` como reverse proxy hacia `api:8000`.
+
+## Arranque local (desarrollo Python)
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows
 pip install -e .
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+## Arranque para despliegue/pruebas con Docker
+
+```bash
+docker compose up --build -d
+```
+
+Checks rápidos:
+
+```bash
+curl -sS http://localhost/health
+curl -sS http://localhost/v1/analytics/summary -H 'X-Tenant-Id: demo'
+```
+
+## Verificación de aislamiento de red
+
+- `api` **no** debe tener puertos publicados al host.
+- Toda llamada externa debe entrar por `nginx`.
+
+Comando recomendado:
+
+```bash
+docker compose ps
+```
+
+Debe mostrar `nginx` con `0.0.0.0:80->80/tcp` y `api` sin puertos publicados.
