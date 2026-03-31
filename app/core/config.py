@@ -11,7 +11,7 @@ class Settings:
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./gpu_broker.db")
     admin_token: str = os.getenv("ADMIN_TOKEN", "change-me")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    host: str = os.getenv("HOST", "127.0.0.1")
+    host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
     llama_server_url: str = os.getenv("LLAMA_SERVER_URL", "")
 
